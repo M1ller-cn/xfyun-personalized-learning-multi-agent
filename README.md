@@ -1,9 +1,5 @@
 # 星图智课
 
-> 面向中外合作办学学生的 AI 个性化学习与教学管理平台。
-
-星图智课将外文开放课程、中文课程知识库与多智能体协作整合为一套学习闭环：学生获得“学、练、测、评、改”的下一步建议；教师能完成课程、班级、试卷与学情管理；移动端同步待办和学习进度。
-
 ## 核心能力
 
 - **动态学习画像与路径规划**：识别学习目标、薄弱知识点与学习行为，形成可调整的个性化路径。
@@ -36,7 +32,6 @@
 ├── ppt-service/                 # PPT 生成服务
 ├── typst-service/               # 试卷/文档排版服务
 ├── rtc-service/                 # 实时音视频服务
-├── 数据集与模型部署配置/          # 课程 RAG、词库与部署配置说明
 ├── scripts/                     # Windows PowerShell 启动与检查脚本
 └── docs/                        # 产品与部署文档
 ```
@@ -61,7 +56,7 @@ Copy-Item docker/.env.example docker/.env
 Copy-Item web/.env.example web/.env.local
 ```
 
-编辑 `docker/.env`，至少修改数据库、Redis、Neo4j、JWT 的默认口令；如需 AI 对话，填写 `DEEPSEEK_API_KEY` 并将 `DEEPSEEK_ENABLED=true`。数字人、OSS、语音等为可选配置。
+编辑 `docker/.env`，填写数据库、Redis、Neo4j、JWT 等本地配置；如需 AI 对话，填写 `DEEPSEEK_API_KEY` 并将 `DEEPSEEK_ENABLED=true`。数字人、OSS、语音等为可选配置。
 
 ### 3. 启动后端依赖与服务
 
@@ -86,22 +81,9 @@ cd "项目根目录"
 - 教师端：`http://127.0.0.1:5174/login?entry=teacher`
 - 教师端登录后：`http://127.0.0.1:5174/admin`
 
-演示管理员账号为 `admin`，密码为 `123`。**公开部署时请立即修改或删除该演示账号。**
-
 ### 5. 健康检查与停止
 
 ```powershell
 ./scripts/check-platform-readiness.ps1
 docker compose --env-file docker/.env -f docker/docker-compose.yml stop
 ```
-
-## 开源前安全说明
-
-- 不要提交 `docker/.env`、`web/.env.local` 或任何真实 API Key。
-- 浏览器可读取 `VITE_*` 变量，因此它们不得存放长期有效的服务端密钥；第三方数字人接入请使用供应商推荐的短期令牌或服务端代理。
-- 默认 Compose 仅适用于本地开发和演示，不应直接暴露到公网。
-- 课程资料、视频和第三方服务需要遵守各自的许可证、平台条款与版权要求。
-
-## 上游与许可证
-
-本项目在 [Ubanillx/NovaCloudEdu](https://github.com/Ubanillx/NovaCloudEdu) 的开源基础上进行学习场景重构与扩展，包含个性化学习路径、课程 RAG、教师工作台、代码评测和数字助教等定制功能。保留上游项目的 **CC BY-NC-SA 4.0** 许可证与署名要求，详见 [LICENSE](LICENSE) 和 [NOTICE.md](NOTICE.md)。
