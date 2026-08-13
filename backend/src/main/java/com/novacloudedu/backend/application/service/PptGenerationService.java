@@ -1,0 +1,2309 @@
+package com.novacloudedu.backend.application.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.novacloudedu.backend.domain.ppt.entity.PptGenerationSession;
+import com.novacloudedu.backend.domain.ppt.entity.PptTemplate;
+import com.novacloudedu.backend.domain.ppt.repository.PptGenerationSessionRepository;
+import com.novacloudedu.backend.domain.ppt.repository.PptTemplateRepository;
+import com.novacloudedu.backend.domain.ppt.valueobject.PptTemplateId;
+import com.novacloudedu.backend.domain.membership.service.AiUsageLimitService;
+import com.novacloudedu.backend.domain.membership.valueobject.AiFeatureType;
+import com.novacloudedu.backend.exception.BusinessException;
+import com.novacloudedu.backend.infrastructure.ai.LangchainChatService;
+import com.novacloudedu.backend.infrastructure.ai.agent.AgentTaskTracker;
+import com.novacloudedu.backend.infrastructure.ai.agent.PptAgentOrchestrator;
+import com.novacloudedu.backend.infrastructure.ppt.PptServiceClient;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * PPT生成助手编排服务
+ *
+ * 多步骤流程：
+ * 1. AI 流式生成 Markdown 大纲
+ * 2. 用户确认/修改大纲
+ * 3. 选择模板 → 调 Python 解析
+ * 4. AI 逐页生成填充 JSON
+ * 5. 组装 → 调 Python 生成 PPTX → 返回 OSS URL
+ *
+ * 所有步骤通过 SSE 实时推送到前端。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class PptGenerationService {
+
+    private final PptGenerationSessionRepository sessionRepository;
+    private final PptTemplateRepository templateRepository;
+    private final LangchainChatService langchainChatService;
+    private final PptServiceClient pptServiceClient;
+    private final AiUsageLimitService aiUsageLimitService;
+    private final PptAgentOrchestrator pptAgentOrchestrator;
+    private final PptProjectService pptProjectService;
+    private final com.novacloudedu.backend.infrastructure.ai.agent.ImageGenerationTool imageGenerationTool;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+
+    // ==================== 意图识别 Prompt ====================
+
+    private static final String INTENT_SYSTEM_PROMPT = """
+            你是一个PPT生成助手。分析用户的消息，判断用户是否想要生成PPT/演示文稿。
+
+            ## 项目文档
+            用户可能已经关联了一个「项目」，项目中包含文档和图片。如果用户消息中附带了项目文档内容，
+            你应该充分理解和利用这些文档信息来：
+            - 更精准地理解用户的需求和主题
+            - 从文档中提取关键信息作为PPT主题
+            - 在确认回复中体现你对文档内容的理解
+
+            ## 意图判断规则
+            如果用户想要生成PPT，请：
+            1. 用友好的语气确认用户的需求，如果有项目文档，简要说明你已理解文档内容
+            2. 提炼出PPT的核心主题
+            3. 在回复的最后一行，输出一个JSON标记：<<PPT_INTENT:{"topic":"提炼的主题"}>>
+
+            如果用户不是想要生成PPT，请正常回复用户的问题，不要输出任何标记。
+
+            示例1：
+            用户：帮我做一个关于人工智能在教育领域应用的PPT
+            回复：好的，我来帮你生成一个关于「人工智能在教育领域的应用」的PPT。我会先为你生成一份大纲，你确认后再进行制作。
+            <<PPT_INTENT:{"topic":"人工智能在教育领域的应用"}>>
+
+            示例2（有项目文档）：
+            用户：[项目文档包含智云星课产品介绍] 帮我做个网站介绍PPT
+            回复：我已阅读项目文档，了解到「智云星课」是一个AI驱动的在线教育平台，具有课程体系、师资管理、直播录播等功能。我来为你生成一份关于智云星课网站介绍的PPT。
+            <<PPT_INTENT:{"topic":"智云星课网站介绍"}>>
+
+            示例3：
+            用户：今天天气怎么样
+            回复：抱歉，我无法查询天气信息。如果你需要制作PPT，可以告诉我主题，我来帮你生成。
+            """;
+
+    // ==================== 大纲生成用模型（超长上下文） ====================
+
+    private static final String PPT_OUTLINE_MODEL = "dashscope/qwen-long";
+
+    // ==================== 逐页填充用视觉模型 ====================
+
+    private static final String PPT_SLIDE_VISION_MODEL = "dashscope/qwen-vl-max";
+
+    // ==================== 大纲 Prompt ====================
+
+    private static final String OUTLINE_SYSTEM_PROMPT = """
+            You are a professional presentation outline designer. Generate a structured Markdown outline based on the user's topic, requirements, and template page structure.
+            
+            The template structure is described in the user message. Plan the outline according to the template's page types (cover, section, content, ending) and semantic attributes.
+            
+            Requirements:
+            1. Use Markdown format: # for the PPT title (cover), ## for chapter/section titles, ### for content page headings
+            2. Each chapter should contain 2-4 bullet points — concise and impactful
+            3. Must include a cover page (# title) and an ending page (## Thank You / Summary)
+            4. The number of chapters must match the template's page count — no more, no fewer
+            5. Adapt content volume per page based on the template's text_density and suggested_content_format:
+               - text_density=low → short phrases only
+               - text_density=medium → title + 2-3 concise points
+               - text_density=high → title + 4-6 detailed points
+               - suggested_content_format=bullet_points → use dash-list format
+               - suggested_content_format=short_phrases → single-line keywords/phrases
+               - suggested_content_format=numbers_stats → emphasize data and statistics
+            6. If audience_level and tone are specified, match the language register accordingly
+            7. Content should be professional, logical, and presentation-ready
+            8. Output ONLY the outline — no explanations, no meta-commentary
+            """;
+
+    private static final String REVISE_SYSTEM_PROMPT = """
+            You are a professional presentation outline designer. The user is unsatisfied with the previous outline. Revise it based on their feedback.
+            
+            Revision requirements:
+            1. Keep the Markdown format unchanged
+            2. Make targeted modifications based on the user's specific feedback
+            3. Output ONLY the revised complete outline — no explanations
+            """;
+
+    // ==================== 逐页填充 Prompt（视觉模型增强） ====================
+
+    private static final String SLIDE_FILL_SYSTEM_PROMPT = """
+            You are a PPT content filling assistant. You will receive a high-resolution screenshot of a template slide \
+            along with its slot structure information and semantic metadata.
+            
+            ## Visual Understanding
+            1. Observe the screenshot to understand the page's visual layout and design style
+            2. Use emphasis_area to identify where the visual focal point is — place the most important content there
+            3. Use font_style hints to match text length to the observed typography
+            4. Match text volume to text_density: low → minimal text, medium → moderate, high → detailed
+            
+            ## Content Format
+            Adapt content structure based on suggested_content_format:
+            - bullet_points → use "items" array with concise bullet points
+            - paragraphs → use "text" with flowing prose
+            - short_phrases → use "text" with brief keywords/phrases
+            - numbers_stats → emphasize quantitative data and statistics
+            - mixed → combine formats as appropriate
+            
+            ## Strict Requirements
+            1. Output pure JSON only — no markdown code blocks, no explanations
+            2. template_slide_index MUST be an actually existing page index in the template
+            3. shape_id MUST use only the shape_ids listed for the template page
+            4. Match page role to content: cover → title slide, content → body, section → chapter divider, ending → closing
+            5. Text must be concise and presentation-ready
+            6. For bullet lists, use "items" array instead of "text"
+            7. Fill ALL shapes where fillable=YES — omissions leave ugly placeholder text visible
+            """;
+
+    // ==================== 公共方法 ====================
+
+    /**
+     * 处理前端的各种 action 请求，返回 SSE 流
+     */
+    public SseEmitter handleAction(String action, Map<String, Object> params, Long userId) {
+        return switch (action) {
+            case "detect_intent" -> doDetectIntent(params, userId);
+            case "generate_outline" -> doGenerateOutline(params, userId);
+            case "revise_outline" -> doReviseOutline(params, userId);
+            case "confirm_outline" -> doConfirmOutline(params, userId);
+            case "select_template" -> doSelectTemplate(params, userId);
+            case "skip_template" -> doSkipTemplate(params, userId);
+            case "generate_ppt" -> doGeneratePpt(params, userId);
+            case "agent_generate_outline" -> doAgentGenerateOutline(params, userId);
+            case "agent_generate_ppt" -> doAgentGeneratePpt(params, userId);
+            case "assemble_ppt" -> doAssemblePpt(params, userId);
+            case "update_outline" -> doUpdateOutline(params, userId);
+            default -> throw new BusinessException(40000, "未知的操作: " + action);
+        };
+    }
+
+    // ==================== 步骤 0：意图识别 ====================
+
+    private SseEmitter doDetectIntent(Map<String, Object> params, Long userId) {
+        String message = (String) params.get("message");
+        if (message == null || message.isBlank()) {
+            throw new BusinessException(40000, "缺少 message 参数");
+        }
+
+        EmitterHolder holder = createEmitter(60_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                // 如果关联了项目，注入项目文档上下文到用户消息中
+                String enrichedMessage = message;
+                Long projectId = params.get("projectId") != null ? toLong(params.get("projectId")) : null;
+                if (projectId != null) {
+                    String projectContext = pptProjectService.getProjectDocumentsContext(projectId);
+                    if (projectContext != null && !projectContext.isBlank()) {
+                        enrichedMessage = projectContext + "\n\n用户消息：" + message;
+                        log.info("意图识别：已注入项目文档上下文，projectId={}", projectId);
+                    }
+                }
+
+                StringBuilder fullResponse = new StringBuilder();
+                List<Map<String, String>> messages = List.of(
+                        Map.of("role", "system", "content", INTENT_SYSTEM_PROMPT),
+                        Map.of("role", "user", "content", enrichedMessage)
+                );
+
+                langchainChatService.streamChat(null, messages, token -> {
+                    if (!alive.get()) return;
+                    try {
+                        fullResponse.append(token);
+                        emitter.send(SseEmitter.event().name("message").data(token));
+                    } catch (IOException e) {
+                        alive.set(false);
+                        log.debug("SSE发送失败，客户端可能已断开");
+                    }
+                });
+
+                // 解析 AI 回复中的意图标记
+                String aiResponse = fullResponse.toString();
+                String intentMarker = extractIntentMarker(aiResponse);
+
+                if (intentMarker != null) {
+                    JsonNode intentJson = objectMapper.readTree(intentMarker);
+                    String topic = intentJson.path("topic").asText("");
+
+                    PptGenerationSession session = PptGenerationSession.create(userId, topic, projectId);
+                    sessionRepository.save(session);
+
+                    sendEvent(emitter, alive, "intent", Map.of(
+                            "detected", true,
+                            "topic", topic,
+                            "sessionId", session.getId()
+                    ));
+                } else {
+                    sendEvent(emitter, alive, "intent", Map.of(
+                            "detected", false
+                    ));
+                }
+
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                log.error("意图识别异常", e);
+                if (alive.get()) {
+                    try {
+                        emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
+                    } catch (IOException ioException) {
+                        log.debug("客户端已断开，无法发送错误消息");
+                    }
+                    try { emitter.completeWithError(e); } catch (Exception ignored) {}
+                }
+                alive.set(false);
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 从 AI 回复中提取 PPT_INTENT 标记
+     */
+    private String extractIntentMarker(String response) {
+        String prefix = "<<PPT_INTENT:";
+        String suffix = ">>";
+        int start = response.indexOf(prefix);
+        if (start < 0) return null;
+        int jsonStart = start + prefix.length();
+        int end = response.indexOf(suffix, jsonStart);
+        if (end < 0) return null;
+        return response.substring(jsonStart, end).trim();
+    }
+
+    // ==================== 步骤 1：生成大纲 ====================
+
+    private SseEmitter doGenerateOutline(Map<String, Object> params, Long userId) {
+        aiUsageLimitService.checkAndConsume(userId, AiFeatureType.AI_PPT);
+        Long sessionId = toLong(params.get("sessionId"));
+        String requirements = (String) params.getOrDefault("requirements", "");
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        session.startGeneratingOutline();
+        sessionRepository.save(session);
+
+        EmitterHolder holder = createEmitter(300_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "generating_outline", "message", "正在根据模板结构生成大纲..."));
+
+                // 构建包含模板结构的用户消息
+                StringBuilder userMessage = new StringBuilder();
+                userMessage.append("主题：").append(session.getTopic());
+                if (requirements != null && !requirements.isBlank()) {
+                    userMessage.append("\n额外要求：").append(requirements);
+                }
+
+                // 将模板结构摘要喂给 AI（精准控制页数）
+                if (session.getTemplateJson() != null && !session.getTemplateJson().isBlank()) {
+                    JsonNode templateRoot = objectMapper.readTree(session.getTemplateJson());
+                    TemplateAnalysis ta = analyzeTemplate(templateRoot);
+                    String templatePrompt = buildTemplatePlannerPrompt(ta);
+                    userMessage.append("\n\nBelow is the presentation template page structure. Plan the outline according to this structure:\n");
+                    userMessage.append(templatePrompt);
+                }
+
+                StringBuilder fullOutline = new StringBuilder();
+                List<Map<String, String>> messages = List.of(
+                        Map.of("role", "system", "content", OUTLINE_SYSTEM_PROMPT),
+                        Map.of("role", "user", "content", userMessage.toString())
+                );
+
+                // 使用超长上下文模型
+                langchainChatService.streamChat(PPT_OUTLINE_MODEL, messages, token -> {
+                    if (!alive.get()) return;
+                    try {
+                        fullOutline.append(token);
+                        emitter.send(SseEmitter.event().name("message").data(token));
+                    } catch (IOException e) {
+                        alive.set(false);
+                        log.debug("SSE发送失败，客户端可能已断开");
+                    }
+                });
+
+                // 大纲生成完成，保存
+                session.outlineReady(fullOutline.toString());
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "outline", Map.of(
+                        "sessionId", session.getId(),
+                        "markdown", fullOutline.toString()
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 2：修改大纲 ====================
+
+    private SseEmitter doReviseOutline(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        String feedback = (String) params.get("feedback");
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        session.startGeneratingOutline();
+        sessionRepository.save(session);
+
+        EmitterHolder holder = createEmitter(300_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "generating_outline", "message", "正在根据反馈修改大纲..."));
+
+                String userMessage = "原大纲：\n" + session.getOutlineMarkdown()
+                        + "\n\n用户反馈：\n" + feedback;
+
+                StringBuilder fullOutline = new StringBuilder();
+                List<Map<String, String>> messages = List.of(
+                        Map.of("role", "system", "content", REVISE_SYSTEM_PROMPT),
+                        Map.of("role", "user", "content", userMessage)
+                );
+
+                langchainChatService.streamChat(null, messages, token -> {
+                    if (!alive.get()) return;
+                    try {
+                        fullOutline.append(token);
+                        emitter.send(SseEmitter.event().name("message").data(token));
+                    } catch (IOException e) {
+                        alive.set(false);
+                        log.debug("SSE发送失败，客户端可能已断开");
+                    }
+                });
+
+                session.outlineReady(fullOutline.toString());
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "outline", Map.of(
+                        "sessionId", session.getId(),
+                        "markdown", fullOutline.toString()
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 3：确认大纲 ====================
+
+    private SseEmitter doConfirmOutline(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        // 新流程：模板已在大纲之前选好，确认大纲后直接进入可生成状态
+        sessionRepository.save(session);
+
+        EmitterHolder holder = createEmitter(30_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "template_ready", "message", "大纲已确认，准备生成幻灯片"));
+                sendEvent(emitter, alive, "outline_confirmed", Map.of(
+                        "sessionId", session.getId()
+                ));
+                sendDone(emitter, alive);
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 3.5：用户手动编辑大纲JSON ====================
+
+    private SseEmitter doUpdateOutline(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        String outlineJsonStr = (String) params.get("outlineJson");
+
+        if (outlineJsonStr == null || outlineJsonStr.isBlank()) {
+            throw new BusinessException(40000, "缺少 outlineJson 参数");
+        }
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        session.updateOutlineJson(outlineJsonStr);
+        sessionRepository.save(session);
+
+        EmitterHolder holder = createEmitter(10_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                sendEvent(emitter, alive, "outline_updated", Map.of(
+                        "sessionId", session.getId(),
+                        "outlineJson", outlineJsonStr
+                ));
+                sendDone(emitter, alive);
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 4：选择模板 ====================
+
+    private SseEmitter doSelectTemplate(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        Long templateId = params.get("templateId") != null ? toLong(params.get("templateId")) : null;
+        String templateUrl = (String) params.get("templateUrl");
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+
+        EmitterHolder holder = createEmitter(120_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                // === 通过 templateId 选择已上传的模板 ===
+                if (templateId != null) {
+                    PptTemplate template = templateRepository.findById(PptTemplateId.of(templateId))
+                            .orElseThrow(() -> new BusinessException(40400, "模板不存在"));
+
+                    // 检查解析状态 — 只有 READY 才能使用
+                    if (!template.isParsed()) {
+                        String statusMsg = switch (template.getParseStatus()) {
+                            case PENDING, PARSING -> "模板正在解析中，请稍后再试";
+                            case FAILED -> "模板解析失败，请联系管理员重新解析";
+                            default -> "模板尚未就绪";
+                        };
+                        throw new BusinessException(40000, statusMsg);
+                    }
+
+                    // 已解析完成，直接使用缓存的 enriched structureJson
+                    session.startParsingTemplate(templateId, template.getTemplateUrl());
+                    session.templateReady(template.getStructureJson());
+                    sessionRepository.save(session);
+
+                    sendEvent(emitter, alive, "status",
+                            Map.of("phase", "template_ready", "message", "模板已就绪，正在渲染预览..."));
+
+                    PptServiceClient.RenderSlidesResult renderResult =
+                            pptServiceClient.renderSlideImages(template.getTemplateUrl());
+
+                    sendEvent(emitter, alive, "template_parsed",
+                            parseTemplateJsonForFrontend(template.getStructureJson(),
+                                    template.getTemplateUrl(), renderResult));
+                    sendDone(emitter, alive);
+                    return;
+                }
+
+                // === 通过 templateUrl 直接传入（未入库的临时模板）===
+                if (templateUrl == null || templateUrl.isBlank()) {
+                    throw new BusinessException(40000, "请提供模板ID或模板URL");
+                }
+
+                session.startParsingTemplate(null, templateUrl);
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "parsing_template",
+                                "message", "正在语义增强解析模板（多模态分析）..."));
+
+                PptServiceClient.ParseEnrichedResult enrichedResult =
+                        pptServiceClient.parseTemplateEnriched(templateUrl);
+
+                session.templateReady(enrichedResult.fullResponseJson());
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "template_ready",
+                                "message", "模板语义增强解析完成"));
+
+                sendEvent(emitter, alive, "template_parsed",
+                        parseTemplateJsonForFrontend(
+                                enrichedResult.fullResponseJson(),
+                                templateUrl,
+                                enrichedResult.renderResult()));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 4b：跳过模板（HTML 模式） ====================
+
+    private SseEmitter doSkipTemplate(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+
+        // 用户自定义风格提示词（可选）
+        String styleHint = params.get("styleHint") != null
+                ? params.get("styleHint").toString().trim() : "";
+
+        EmitterHolder holder = createEmitter(30_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                // 标记为 HTML 模式，携带用户自定义风格提示
+                String templateJson = styleHint.isEmpty()
+                        ? "{\"mode\":\"html\",\"slide_count\":0}"
+                        : String.format("{\"mode\":\"html\",\"slide_count\":0,\"styleHint\":\"%s\"}",
+                                styleHint.replace("\"", "\\\""));
+                session.templateReady(templateJson);
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "template_skipped",
+                                "message", styleHint.isEmpty()
+                                        ? "已跳过模板选择，将使用 HTML 模式生成"
+                                        : "已跳过模板选择，风格：" + styleHint));
+                sendEvent(emitter, alive, "template_skipped", Map.of(
+                        "sessionId", session.getId(),
+                        "mode", "html"
+                ));
+                sendDone(emitter, alive);
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 判断 session 是否处于 HTML（无模板）模式
+     */
+    private boolean isHtmlMode(PptGenerationSession session) {
+        String templateJson = session.getTemplateJson();
+        if (templateJson == null || templateJson.isBlank()) return false;
+        return templateJson.contains("\"mode\":\"html\"");
+    }
+
+    // ==================== 步骤 5：生成 PPT（逐页渲染预览 + 自动组装） ====================
+
+    private SseEmitter doGeneratePpt(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+
+        if (session.getTemplateJson() == null || session.getTemplateJson().isBlank()) {
+            throw new BusinessException(40000, "请先选择模板");
+        }
+        if (session.getOutlineMarkdown() == null || session.getOutlineMarkdown().isBlank()) {
+            throw new BusinessException(40000, "大纲为空");
+        }
+
+        EmitterHolder holder = createEmitter(600_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                session.startGeneratingSlides();
+                sessionRepository.save(session);
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "generating_slides", "message", "AI 正在逐页生成内容..."));
+
+                // 1. 解析大纲为章节列表
+                List<String> sections = parseOutlineToSections(session.getOutlineMarkdown());
+                int totalSlides = sections.size();
+
+                // 2. 解析模板结构
+                JsonNode templateRoot = objectMapper.readTree(session.getTemplateJson());
+                String templateSlidesInfo = buildTemplateSlidesDescription(templateRoot);
+
+                // 3. 逐页：AI 生成配置 → 渲染预览图 → 推送前端
+                List<Map<String, Object>> allSlides = new ArrayList<>();
+                String templateUrl = session.getTemplateUrl();
+
+                for (int i = 0; i < totalSlides; i++) {
+                    if (!alive.get()) {
+                        log.info("客户端已断开，停止生成: sessionId={}, 已完成 {}/{} 页",
+                                session.getId(), i, totalSlides);
+                        break;
+                    }
+
+                    String section = sections.get(i);
+                    sendEvent(emitter, alive, "status",
+                            Map.of("phase", "generating_slides",
+                                    "message", String.format("正在生成第 %d/%d 页...", i + 1, totalSlides)));
+
+                    // AI 生成单页填充 JSON（纯文本模式）
+                    String slideJson = generateSlideConfig(
+                            section, templateSlidesInfo, i, totalSlides, null);
+                    Map<String, Object> slideConfig = parseSlideJson(slideJson);
+
+                    if (slideConfig != null) {
+                        // 调 Python 克隆+填充+渲染该页为 PNG 预览图
+                        String previewImageUrl = null;
+                        try {
+                            PptServiceClient.SlidePreviewResult previewResult =
+                                    pptServiceClient.generateSlidePreview(templateUrl, slideConfig);
+                            previewImageUrl = previewResult.imageUrl();
+                        } catch (Exception e) {
+                            log.warn("第{}页预览图渲染失败: {}", i + 1, e.getMessage());
+                        }
+
+                        // 将预览图 URL 写入 slideConfig，以便持久化到 slidesJson
+                        if (previewImageUrl != null) {
+                            slideConfig.put("previewImageUrl", previewImageUrl);
+                        }
+                        allSlides.add(slideConfig);
+
+                        Map<String, Object> progressData = new HashMap<>();
+                        progressData.put("current", i + 1);
+                        progressData.put("total", totalSlides);
+                        progressData.put("previewImageUrl", previewImageUrl != null ? previewImageUrl : "");
+                        sendEvent(emitter, alive, "slide_progress", progressData);
+                    } else {
+                        log.warn("第{}页JSON解析失败，跳过", i + 1);
+                    }
+                }
+
+                if (allSlides.isEmpty()) {
+                    throw new RuntimeException("未生成任何有效的幻灯片配置");
+                }
+
+                // 5. 保存 slidesJson
+                session.saveSlidesJson(objectMapper.writeValueAsString(allSlides));
+                sessionRepository.save(session);
+
+                // 6. 自动组装完整 PPTX
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "assembling", "message", "正在生成PPT文件..."));
+                session.startAssembling(session.getSlidesJson());
+                sessionRepository.save(session);
+
+                String title = extractTitle(session.getOutlineMarkdown());
+                Map<String, Object> generateRequest = new HashMap<>();
+                generateRequest.put("template_url", templateUrl);
+                generateRequest.put("title", title);
+                generateRequest.put("author", "");
+                generateRequest.put("slides", allSlides);
+
+                PptServiceClient.GenerateResult result = pptServiceClient.generate(generateRequest);
+
+                session.completed(result.fileUrl());
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "completed", "message", "PPT生成完成！"));
+                sendEvent(emitter, alive, "result", Map.of(
+                        "fileUrl", result.fileUrl(),
+                        "fileName", result.fileName(),
+                        "slideCount", result.slideCount()
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== Agent 模式：智能大纲生成（带联网搜索） ====================
+
+    private SseEmitter doAgentGenerateOutline(Map<String, Object> params, Long userId) {
+        aiUsageLimitService.checkAndConsume(userId, AiFeatureType.AI_PPT);
+        Long sessionId = toLong(params.get("sessionId"));
+        String requirements = (String) params.getOrDefault("requirements", "");
+
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        session.startGeneratingOutline();
+        sessionRepository.save(session);
+
+        EmitterHolder holder = createEmitter(600_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                // 创建任务跟踪器，通过 SSE 推送 agent_todo 事件
+                AgentTaskTracker tracker = new AgentTaskTracker(event -> {
+                    if (alive.get()) {
+                        try {
+                            sendEvent(emitter, alive, "agent_todo", event);
+                        } catch (IOException ex) {
+                            log.warn("推送 agent_todo 事件失败", ex);
+                            alive.set(false);
+                        }
+                    }
+                });
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "agent_researching", "message",
+                                "AI Agent 正在联网搜索相关资料..."));
+
+                // 获取模板结构摘要（精简版供 PlannerAgent 使用，精准控制页数）
+                String templateSummary = null;
+                boolean htmlMode = isHtmlMode(session);
+
+                if (htmlMode) {
+                    // HTML 模式：无模板约束，PlannerAgent 自行决定页数
+                    templateSummary = """
+                            ## No Template Selected (HTML Mode)
+                            
+                            You are free to decide the number of slides. A typical presentation has 8-15 slides.
+                            Suggested structure:
+                            - 1 cover slide (# Main Title)
+                            - 2-4 chapters (## Chapter Title), each with 2-3 content pages (### Content Page)
+                            - 1 ending slide (## Thank You / Summary)
+                            
+                            Under each ###, write 2-4 bullet points (using - list format).
+                            """;
+                    log.info("HTML 模式大纲生成：PlannerAgent 自由规划页数");
+                } else if (session.getTemplateJson() != null && !session.getTemplateJson().isBlank()) {
+                    JsonNode templateRoot = objectMapper.readTree(session.getTemplateJson());
+                    TemplateAnalysis ta = analyzeTemplate(templateRoot);
+                    templateSummary = buildTemplatePlannerPrompt(ta);
+                }
+
+                // Vision-based 模板智能分析（仅模板模式）
+                if (!htmlMode && session.getTemplateUrl() != null && !session.getTemplateUrl().isBlank()) {
+                    try {
+                        var visionResult = pptServiceClient.analyzeTemplate(session.getTemplateUrl());
+                        if (visionResult.hasContent()) {
+                            templateSummary = (templateSummary != null ? templateSummary + "\n\n" : "")
+                                    + visionResult.agentDescription();
+                            log.info("模板视觉分析已附加到 PlannerAgent 输入");
+                        }
+                    } catch (Exception e) {
+                        log.warn("模板视觉分析失败，使用纯结构信息: {}", e.getMessage());
+                    }
+                }
+
+                // 注入项目文档上下文
+                String projectContext = "";
+                if (session.getProjectId() != null) {
+                    projectContext = pptProjectService.getProjectDocumentsContext(session.getProjectId());
+                    if (!projectContext.isBlank()) {
+                        sendEvent(emitter, alive, "status",
+                                Map.of("phase", "agent_researching", "message",
+                                        "已加载项目文档，正在结合文档内容生成大纲..."));
+                    }
+                }
+                String enhancedRequirements = requirements;
+                if (!projectContext.isBlank()) {
+                    enhancedRequirements = (requirements != null ? requirements + "\n\n" : "") + projectContext;
+                }
+
+                // PlannerAgent 联网搜索 + 规划大纲（带任务跟踪）
+                PptAgentOrchestrator.OutlineResult outlineResult =
+                        pptAgentOrchestrator.planOutline(session.getTopic(), enhancedRequirements, templateSummary, tracker);
+
+                // 推送研究摘要
+                if (outlineResult.researchSummary() != null && !outlineResult.researchSummary().isBlank()) {
+                    sendEvent(emitter, alive, "research_summary",
+                            Map.of("summary", outlineResult.researchSummary()));
+                }
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "generating_outline", "message", "Agent 已完成调研，正在生成大纲..."));
+
+                // 流式推送大纲内容（模拟逐字输出，提升体验）
+                String outlineMarkdown = outlineResult.outlineMarkdown();
+                int chunkSize = 20;
+                for (int i = 0; i < outlineMarkdown.length() && alive.get(); i += chunkSize) {
+                    String chunk = outlineMarkdown.substring(i, Math.min(i + chunkSize, outlineMarkdown.length()));
+                    try {
+                        emitter.send(SseEmitter.event().name("message").data(chunk));
+                        Thread.sleep(30);
+                    } catch (IOException e) {
+                        alive.set(false);
+                        break;
+                    }
+                }
+
+                // 将 Markdown 大纲转换为结构化 JSON
+                String outlineJsonStr = convertMarkdownToOutlineJson(outlineMarkdown, session.getTopic());
+
+                // 保存大纲（同时保存 markdown 和 json 两种格式）
+                session.outlineReady(outlineMarkdown);
+                session.updateOutlineJson(outlineJsonStr);
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "outline", Map.of(
+                        "sessionId", session.getId(),
+                        "markdown", outlineMarkdown,
+                        "outlineJson", outlineJsonStr,
+                        "researchSummary", outlineResult.researchSummary() != null
+                                ? outlineResult.researchSummary() : ""
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== Agent 模式：并发智能生成 PPT（搜索+文生图+评估+反思修复） ====================
+
+    private SseEmitter doAgentGeneratePpt(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+
+        if (session.getTemplateJson() == null || session.getTemplateJson().isBlank()) {
+            throw new BusinessException(40000, "请先选择模板或跳过模板");
+        }
+        if (session.getOutlineMarkdown() == null || session.getOutlineMarkdown().isBlank()) {
+            throw new BusinessException(40000, "大纲为空");
+        }
+
+        boolean htmlMode = isHtmlMode(session);
+        if (htmlMode) {
+            return doAgentGeneratePptHtml(session, userId);
+        }
+
+        EmitterHolder holder = createEmitter(900_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                session.startGeneratingSlides();
+                sessionRepository.save(session);
+
+                // SSE 发送锁：SseEmitter.send() 不是线程安全的，并发回调必须串行化发送
+                final Object sseLock = new Object();
+
+                // 创建任务跟踪器，通过 SSE 推送 agent_todo 事件
+                AgentTaskTracker tracker = new AgentTaskTracker(event -> {
+                    if (alive.get()) {
+                        try {
+                            synchronized (sseLock) {
+                                sendEvent(emitter, alive, "agent_todo", event);
+                            }
+                        } catch (IOException ex) {
+                            log.warn("推送 agent_todo 事件失败", ex);
+                            alive.set(false);
+                        }
+                    }
+                });
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "agent_generating",
+                                "message", "Multi-Agent 正在并发生成幻灯片（联网搜索 + 文生图）..."));
+
+                // 1. 解析大纲为章节列表
+                List<String> rawSections = parseOutlineToSections(session.getOutlineMarkdown());
+
+                // 2. 解析模板结构 → 分析 → 分配 → 绑定
+                JsonNode templateRoot = objectMapper.readTree(session.getTemplateJson());
+                TemplateAnalysis ta = analyzeTemplate(templateRoot);
+                Map<Integer, String> pageDescriptions = buildPerPageDescriptions(templateRoot);
+
+                // 程序化分配 template_slide_index（根据 section 标题级别 → 模板角色）
+                List<Integer> templateIndexes = assignTemplateSlideIndexes(rawSections, ta);
+
+                // 将每个 section 与其对应模板页详情绑定（ContentAgent 只需看本页 shape 信息）
+                List<String> sections = enrichSectionsWithTemplateInfo(rawSections, templateIndexes, pageDescriptions);
+                int totalSlides = sections.size();
+
+                // templateSlidesInfo 仅作为概览（ContentAgent 主要用 [TEMPLATE_PAGE] 块中的信息）
+                String templateSlidesInfo = buildTemplatePlannerPrompt(ta);
+                String templateUrl = session.getTemplateUrl();
+
+                log.info("Agent PPT 生成: 大纲 {} 个 section, 模板 {} 页 (cover={}, toc={}, section={}, content={}, ending={}, credits={})",
+                        totalSlides, ta.totalPages(), ta.coverCount(), ta.tocCount(),
+                        ta.sectionCount(), ta.contentCount(), ta.endingCount(), ta.creditsCount());
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "agent_generating",
+                                "message", String.format("共 %d 页，Agent 并发生成中...", totalSlides)));
+
+                // 2.5 推送所有幻灯片占位符（让前端立即显示全部占位符+状态）
+                List<Map<String, Object>> placeholders = new ArrayList<>();
+                for (int i = 0; i < totalSlides; i++) {
+                    placeholders.add(Map.of(
+                            "index", i,
+                            "status", "pending",
+                            "statusLabel", "等待生成"
+                    ));
+                }
+                sendEvent(emitter, alive, "slide_placeholders",
+                        Map.of("total", totalSlides, "slides", placeholders));
+
+                // 2.6 设置项目图片到 DesignAgent 工具上下文
+                setupProjectImages(session);
+
+                // 3. 使用带反思修复循环的 Agent 生成（含任务跟踪）
+                // 生成 → 评估 → 识别低分页 → 修复重生 → 再评估 → 直到达标或达最大轮次
+                PptAgentOrchestrator.GenerationWithEvalResult genResult =
+                        pptAgentOrchestrator.generateWithReflection(
+                                sections,
+                                templateSlidesInfo,
+                                session.getOutlineMarkdown(),
+                                templateUrl,
+                                // 生成/修复进度回调：为每页渲染预览并推送 SSE
+                                (slideIndex, slideConfig) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        // 如果逐页视觉审查已渲染预览图，复用它避免重复渲染
+                                        String previewImageUrl = slideConfig.containsKey("previewImageUrl")
+                                                ? (String) slideConfig.get("previewImageUrl") : null;
+                                        if (previewImageUrl == null || previewImageUrl.isBlank()) {
+                                            try {
+                                                PptServiceClient.SlidePreviewResult previewResult =
+                                                        pptServiceClient.generateSlidePreview(templateUrl, slideConfig);
+                                                previewImageUrl = previewResult.imageUrl();
+                                            } catch (Exception e) {
+                                                log.warn("Agent模式：第{}页预览图渲染失败: {}",
+                                                        slideIndex + 1, e.getMessage());
+                                            }
+                                        }
+
+                                        if (previewImageUrl != null && !previewImageUrl.isBlank()) {
+                                            slideConfig.put("previewImageUrl", previewImageUrl);
+                                        }
+
+                                        Map<String, Object> progressData = new HashMap<>();
+                                        progressData.put("current", slideIndex + 1);
+                                        progressData.put("total", totalSlides);
+                                        progressData.put("previewImageUrl",
+                                                previewImageUrl != null ? previewImageUrl : "");
+                                        progressData.put("hasGeneratedImage",
+                                                slideConfig.containsKey("generated_image_url"));
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "slide_progress", progressData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("Agent模式：推送第{}页进度失败", slideIndex + 1, e);
+                                    }
+                                },
+                                // 反思修复进度回调：推送修复状态到前端
+                                (round, slideIndex, message) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        String phase = slideIndex == -1 ? "evaluating" : "repairing";
+                                        Map<String, Object> repairData = new HashMap<>();
+                                        repairData.put("phase", phase);
+                                        repairData.put("round", round);
+                                        repairData.put("message", message);
+                                        if (slideIndex >= 0) {
+                                            repairData.put("slideIndex", slideIndex);
+                                        }
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "repair_progress", repairData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("推送修复进度失败", e);
+                                    }
+                                },
+                                tracker,
+                                // 单页状态回调：推送 slide_status SSE 事件
+                                (slideIdx, status, statusLabel) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        Map<String, Object> statusData = new HashMap<>();
+                                        statusData.put("index", slideIdx);
+                                        statusData.put("status", status);
+                                        statusData.put("statusLabel", statusLabel);
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "slide_status", statusData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("推送第{}页状态失败", slideIdx + 1, e);
+                                    }
+                                });
+
+                List<Map<String, Object>> allSlides = genResult.slides();
+                PptAgentOrchestrator.EvaluationResult evalResult = genResult.evaluation();
+                int repairRounds = genResult.repairRounds();
+
+                if (allSlides.isEmpty()) {
+                    throw new RuntimeException("Agent 未生成任何有效的幻灯片配置");
+                }
+
+                // 4. 推送最终评估结果
+                Map<String, Object> evalData = new HashMap<>();
+                evalData.put("overallScore", evalResult.overallScore());
+                evalData.put("contentScore", evalResult.contentScore());
+                evalData.put("designScore", evalResult.designScore());
+                evalData.put("coherenceScore", evalResult.coherenceScore());
+                evalData.put("strengths", evalResult.strengths());
+                evalData.put("weaknesses", evalResult.weaknesses());
+                evalData.put("suggestions", evalResult.suggestions());
+                evalData.put("repairRounds", repairRounds);
+                if (evalResult.slideFeedbacks() != null) {
+                    List<Map<String, Object>> sfList = new ArrayList<>();
+                    for (var sf : evalResult.slideFeedbacks()) {
+                        sfList.add(Map.of("slideIndex", sf.slideIndex(),
+                                "score", sf.score(), "feedback", sf.feedback()));
+                    }
+                    evalData.put("slideFeedbacks", sfList);
+                }
+                sendEvent(emitter, alive, "evaluation_result", evalData);
+
+                // 5. 保存 slidesJson
+                session.saveSlidesJson(objectMapper.writeValueAsString(allSlides));
+                sessionRepository.save(session);
+
+                // 6. 自动组装完整 PPTX
+                String assemblerTaskId = tracker.findTaskIdByRole(AgentTaskTracker.AgentRole.ASSEMBLER);
+                if (assemblerTaskId != null) {
+                    tracker.startTask(assemblerTaskId, "正在组装最终 PPT 文件...");
+                }
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "assembling", "message", "正在组装最终 PPT 文件..."));
+                session.startAssembling(session.getSlidesJson());
+                sessionRepository.save(session);
+
+                String title = extractTitle(session.getOutlineMarkdown());
+                Map<String, Object> generateRequest = new HashMap<>();
+                generateRequest.put("template_url", templateUrl);
+                generateRequest.put("title", title);
+                generateRequest.put("author", "");
+                generateRequest.put("slides", allSlides);
+
+                PptServiceClient.GenerateResult result = pptServiceClient.generate(generateRequest);
+
+                session.completed(result.fileUrl());
+                sessionRepository.save(session);
+
+                if (assemblerTaskId != null) {
+                    tracker.completeTask(assemblerTaskId, "PPT 文件已生成: " + result.fileName());
+                }
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "completed", "message", "PPT 生成完成！"));
+                sendEvent(emitter, alive, "result", Map.of(
+                        "fileUrl", result.fileUrl(),
+                        "fileName", result.fileName(),
+                        "slideCount", result.slideCount(),
+                        "repairRounds", repairRounds,
+                        "evaluation", Map.of(
+                                "overallScore", evalResult.overallScore(),
+                                "contentScore", evalResult.contentScore(),
+                                "designScore", evalResult.designScore(),
+                                "coherenceScore", evalResult.coherenceScore()
+                        )
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            } finally {
+                clearProjectImages();
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== Agent 模式：HTML 无模板生成 PPT ====================
+
+    private SseEmitter doAgentGeneratePptHtml(PptGenerationSession session, Long userId) {
+        EmitterHolder holder = createEmitter(900_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                session.startGeneratingSlides();
+                sessionRepository.save(session);
+
+                final Object sseLock = new Object();
+
+                AgentTaskTracker tracker = new AgentTaskTracker(event -> {
+                    if (alive.get()) {
+                        try {
+                            synchronized (sseLock) {
+                                sendEvent(emitter, alive, "agent_todo", event);
+                            }
+                        } catch (IOException ex) {
+                            log.warn("推送 agent_todo 事件失败", ex);
+                            alive.set(false);
+                        }
+                    }
+                });
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "agent_generating",
+                                "message", "HTML 模式：Multi-Agent 正在生成幻灯片..."));
+
+                // 1. 解析大纲为章节列表
+                List<String> sections = parseOutlineToSections(session.getOutlineMarkdown());
+                int totalSlides = sections.size();
+
+                // 从 templateJson 提取用户自定义风格提示
+                String userStyleHint = "";
+                try {
+                    String tJson = session.getTemplateJson();
+                    if (tJson != null && tJson.contains("styleHint")) {
+                        com.fasterxml.jackson.databind.JsonNode node =
+                                new com.fasterxml.jackson.databind.ObjectMapper().readTree(tJson);
+                        userStyleHint = node.path("styleHint").asText("");
+                    }
+                } catch (Exception ignored) { /* fallback to empty */ }
+
+                log.info("HTML Agent PPT 生成: 大纲 {} 个 section, styleHint='{}'",
+                        totalSlides, userStyleHint.isEmpty() ? "(default)" : userStyleHint);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "agent_generating",
+                                "message", String.format("HTML 模式：共 %d 页，Agent 并发生成中...", totalSlides)));
+
+                // 推送占位符
+                List<Map<String, Object>> placeholders = new ArrayList<>();
+                for (int i = 0; i < totalSlides; i++) {
+                    placeholders.add(Map.of(
+                            "index", i, "status", "pending", "statusLabel", "等待生成"));
+                }
+                sendEvent(emitter, alive, "slide_placeholders",
+                        Map.of("total", totalSlides, "slides", placeholders));
+
+                // 设置项目图片到 DesignAgent 工具上下文
+                setupProjectImages(session);
+
+                // 2. 使用 HTML 模式的反思修复循环生成
+                PptAgentOrchestrator.GenerationWithEvalResult genResult =
+                        pptAgentOrchestrator.generateWithReflectionHtml(
+                                sections,
+                                session.getOutlineMarkdown(),
+                                userStyleHint,
+                                // HTML 进度回调：渲染 HTML 预览并推送 SSE
+                                (slideIndex, slideConfig) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        String previewImageUrl = slideConfig.containsKey("previewImageUrl")
+                                                ? (String) slideConfig.get("previewImageUrl") : null;
+
+                                        // 如果尚无预览图，调用 Python 渲染 HTML → PNG
+                                        if ((previewImageUrl == null || previewImageUrl.isBlank())
+                                                && slideConfig.containsKey("slide_html")) {
+                                            try {
+                                                String generatedImgUrl = slideConfig.containsKey("generated_image_url")
+                                                        ? (String) slideConfig.get("generated_image_url") : null;
+                                                PptServiceClient.SlidePreviewResult previewResult =
+                                                        pptServiceClient.generateHtmlSlidePreview(
+                                                                (String) slideConfig.get("slide_html"),
+                                                                generatedImgUrl);
+                                                previewImageUrl = previewResult.imageUrl();
+                                            } catch (Exception e) {
+                                                log.warn("HTML 模式：第{}页预览渲染失败: {}",
+                                                        slideIndex + 1, e.getMessage());
+                                            }
+                                        }
+
+                                        if (previewImageUrl != null && !previewImageUrl.isBlank()) {
+                                            slideConfig.put("previewImageUrl", previewImageUrl);
+                                        }
+
+                                        Map<String, Object> progressData = new HashMap<>();
+                                        progressData.put("current", slideIndex + 1);
+                                        progressData.put("total", totalSlides);
+                                        progressData.put("previewImageUrl",
+                                                previewImageUrl != null ? previewImageUrl : "");
+                                        progressData.put("mode", "html");
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "slide_progress", progressData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("HTML 模式：推送第{}页进度失败", slideIndex + 1, e);
+                                    }
+                                },
+                                // 反思修复进度回调
+                                (round, slideIndex, message) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        String phase = slideIndex == -1 ? "evaluating" : "repairing";
+                                        Map<String, Object> repairData = new HashMap<>();
+                                        repairData.put("phase", phase);
+                                        repairData.put("round", round);
+                                        repairData.put("message", message);
+                                        if (slideIndex >= 0) repairData.put("slideIndex", slideIndex);
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "repair_progress", repairData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("推送修复进度失败", e);
+                                    }
+                                },
+                                tracker,
+                                // 单页状态回调
+                                (slideIdx, status, statusLabel) -> {
+                                    if (!alive.get()) return;
+                                    try {
+                                        Map<String, Object> statusData = new HashMap<>();
+                                        statusData.put("index", slideIdx);
+                                        statusData.put("status", status);
+                                        statusData.put("statusLabel", statusLabel);
+                                        synchronized (sseLock) {
+                                            sendEvent(emitter, alive, "slide_status", statusData);
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("推送第{}页状态失败", slideIdx + 1, e);
+                                    }
+                                });
+
+                List<Map<String, Object>> allSlides = genResult.slides();
+                PptAgentOrchestrator.EvaluationResult evalResult = genResult.evaluation();
+                int repairRounds = genResult.repairRounds();
+
+                if (allSlides.isEmpty()) {
+                    throw new RuntimeException("HTML Agent 未生成任何有效的幻灯片");
+                }
+
+                // 3. 推送评估结果
+                Map<String, Object> evalData = new HashMap<>();
+                evalData.put("overallScore", evalResult.overallScore());
+                evalData.put("contentScore", evalResult.contentScore());
+                evalData.put("designScore", evalResult.designScore());
+                evalData.put("coherenceScore", evalResult.coherenceScore());
+                evalData.put("strengths", evalResult.strengths());
+                evalData.put("weaknesses", evalResult.weaknesses());
+                evalData.put("suggestions", evalResult.suggestions());
+                evalData.put("repairRounds", repairRounds);
+                if (evalResult.slideFeedbacks() != null) {
+                    List<Map<String, Object>> sfList = new ArrayList<>();
+                    for (var sf : evalResult.slideFeedbacks()) {
+                        sfList.add(Map.of("slideIndex", sf.slideIndex(),
+                                "score", sf.score(), "feedback", sf.feedback()));
+                    }
+                    evalData.put("slideFeedbacks", sfList);
+                }
+                sendEvent(emitter, alive, "evaluation_result", evalData);
+
+                // 4. 保存 slidesJson
+                session.saveSlidesJson(objectMapper.writeValueAsString(allSlides));
+                sessionRepository.save(session);
+
+                // 5. 组装 HTML → PPTX
+                String assemblerTaskId = tracker.findTaskIdByRole(AgentTaskTracker.AgentRole.ASSEMBLER);
+                if (assemblerTaskId != null) {
+                    tracker.startTask(assemblerTaskId, "正在将 HTML 幻灯片转换为 PPT 文件...");
+                }
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "assembling", "message", "正在将 HTML 幻灯片转换为 PPT 文件..."));
+                session.startAssembling(session.getSlidesJson());
+                sessionRepository.save(session);
+
+                String title = extractTitle(session.getOutlineMarkdown());
+                Map<String, Object> generateRequest = new HashMap<>();
+                generateRequest.put("title", title);
+                generateRequest.put("author", "");
+                generateRequest.put("slides", allSlides);
+                generateRequest.put("mode", "html");
+
+                PptServiceClient.GenerateResult result = pptServiceClient.generateFromHtml(generateRequest);
+
+                session.completed(result.fileUrl());
+                sessionRepository.save(session);
+
+                if (assemblerTaskId != null) {
+                    tracker.completeTask(assemblerTaskId, "HTML PPT 文件已生成: " + result.fileName());
+                }
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "completed", "message", "HTML 模式 PPT 生成完成！"));
+                sendEvent(emitter, alive, "result", Map.of(
+                        "fileUrl", result.fileUrl(),
+                        "fileName", result.fileName(),
+                        "slideCount", result.slideCount(),
+                        "repairRounds", repairRounds,
+                        "mode", "html",
+                        "evaluation", Map.of(
+                                "overallScore", evalResult.overallScore(),
+                                "contentScore", evalResult.contentScore(),
+                                "designScore", evalResult.designScore(),
+                                "coherenceScore", evalResult.coherenceScore()
+                        )
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            } finally {
+                clearProjectImages();
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== 步骤 6：组装导出 PPT ====================
+
+    private SseEmitter doAssemblePpt(Map<String, Object> params, Long userId) {
+        Long sessionId = toLong(params.get("sessionId"));
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+
+        if (session.getSlidesJson() == null || session.getSlidesJson().isBlank()) {
+            throw new BusinessException(40000, "尚未生成幻灯片内容");
+        }
+
+        // 如果前端传来了编辑后的 slides，更新 session
+        Object slidesParam = params.get("slides");
+        if (slidesParam != null) {
+            try {
+                String updatedSlidesJson = objectMapper.writeValueAsString(slidesParam);
+                session.saveSlidesJson(updatedSlidesJson);
+                sessionRepository.save(session);
+            } catch (Exception e) {
+                log.warn("解析前端传来的 slides 失败，使用数据库中的版本", e);
+            }
+        }
+
+        EmitterHolder holder = createEmitter(600_000L);
+        SseEmitter emitter = holder.emitter();
+        AtomicBoolean alive = holder.alive();
+
+        executor.execute(() -> {
+            try {
+                session.startAssembling(session.getSlidesJson());
+                sessionRepository.save(session);
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "assembling", "message", "正在生成PPT文件..."));
+
+                List<Map<String, Object>> allSlides = objectMapper.readValue(
+                        session.getSlidesJson(),
+                        new TypeReference<List<Map<String, Object>>>() {});
+
+                String title = extractTitle(session.getOutlineMarkdown());
+                Map<String, Object> generateRequest = new HashMap<>();
+                generateRequest.put("template_url", session.getTemplateUrl());
+                generateRequest.put("title", title);
+                generateRequest.put("author", "");
+                generateRequest.put("slides", allSlides);
+
+                PptServiceClient.GenerateResult result = pptServiceClient.generate(generateRequest);
+
+                session.completed(result.fileUrl());
+                sessionRepository.save(session);
+
+                sendEvent(emitter, alive, "status",
+                        Map.of("phase", "completed", "message", "PPT生成完成！"));
+                sendEvent(emitter, alive, "result", Map.of(
+                        "fileUrl", result.fileUrl(),
+                        "fileName", result.fileName(),
+                        "slideCount", result.slideCount()
+                ));
+                sendDone(emitter, alive);
+
+            } catch (Exception e) {
+                handleError(emitter, alive, session, e);
+            }
+        });
+
+        return emitter;
+    }
+
+    // ==================== AI 单页生成（视觉模型增强） ====================
+
+    private String generateSlideConfig(String section, String templateSlidesInfo,
+                                        int slideIndex, int totalSlides, String slideImageUrl) {
+        String pageType;
+        if (slideIndex == 0) {
+            pageType = "这是封面页，请选择 role 为 cover 的模板页";
+        } else if (slideIndex == totalSlides - 1) {
+            pageType = "这是结束页，请选择 role 为 ending 的模板页";
+        } else {
+            pageType = "这是正文页，请选择 role 为 content 或 section 的模板页";
+        }
+
+        String userMessage = String.format("""
+                可用模板页结构：
+                %s
+
+                当前页类型提示：%s
+
+                需要填充的大纲内容（第%d页，共%d页）：
+                %s
+
+                请输出该页的填充JSON：
+                {"template_slide_index": <int>, "fills": [{"shape_id": <int>, "text": "..."}, ...]}
+                """, templateSlidesInfo, pageType, slideIndex + 1, totalSlides, section);
+
+        // 有截图时使用视觉模型，否则退化为纯文本模型
+        if (slideImageUrl != null && !slideImageUrl.isBlank()) {
+            return langchainChatService.chatWithImage(
+                    PPT_SLIDE_VISION_MODEL, SLIDE_FILL_SYSTEM_PROMPT, userMessage, slideImageUrl);
+        } else {
+            return langchainChatService.chat(null, SLIDE_FILL_SYSTEM_PROMPT, userMessage);
+        }
+    }
+
+    /**
+     * 根据页面位置预判最合适的候选模板页索引（用于渲染截图给视觉模型）
+     * @deprecated 已被 assignTemplateSlideIndexes 替代
+     */
+    @SuppressWarnings("unused")
+    private int pickCandidateTemplateIndex(int slideIndex, int totalSlides,
+                                            Map<String, List<Integer>> roleToIndexes,
+                                            Map<Integer, JsonNode> templateSlideMap) {
+        String targetRole;
+        if (slideIndex == 0) {
+            targetRole = "cover";
+        } else if (slideIndex == totalSlides - 1) {
+            targetRole = "ending";
+        } else {
+            targetRole = "content";
+        }
+
+        // 优先选择目标角色的模板页
+        List<Integer> candidates = roleToIndexes.get(targetRole);
+        if (candidates != null && !candidates.isEmpty()) {
+            return candidates.get(0);
+        }
+
+        // content 不存在时尝试 section
+        if ("content".equals(targetRole)) {
+            candidates = roleToIndexes.get("section");
+            if (candidates != null && !candidates.isEmpty()) {
+                return candidates.get(0);
+            }
+        }
+
+        // ending 不存在时尝试 content
+        if ("ending".equals(targetRole)) {
+            candidates = roleToIndexes.get("content");
+            if (candidates != null && !candidates.isEmpty()) {
+                return candidates.get(0);
+            }
+        }
+
+        // 兜底：返回第一个模板页索引
+        return templateSlideMap.keySet().stream().findFirst().orElse(0);
+    }
+
+    // ==================== 工具方法 ====================
+
+    private PptGenerationSession getSessionAndVerify(Long sessionId, Long userId) {
+        PptGenerationSession session = sessionRepository.findById(sessionId)
+                .orElseThrow(() -> new BusinessException(40400, "会话不存在"));
+        session.verifyOwner(userId);
+        return session;
+    }
+
+    /**
+     * 将 Markdown 大纲拆分为章节列表，每个章节对应一页 PPT。
+     * 分割规则：每个 #、##、### 级标题都成为独立 section（= 一页幻灯片）。
+     * - # 总标题 → 封面页
+     * - ## 章节标题 → 章节过渡页
+     * - ### 内容页标题 → 正文页
+     */
+    private List<String> parseOutlineToSections(String markdown) {
+        List<String> sections = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+
+        for (String line : markdown.split("\n")) {
+            String trimmed = line.trim();
+            // #、##、### 级标题均作为新 section 的开始
+            boolean isHeading = trimmed.startsWith("# ") || trimmed.startsWith("## ") || trimmed.startsWith("### ");
+            if (isHeading && !current.isEmpty()) {
+                sections.add(current.toString().trim());
+                current = new StringBuilder();
+            }
+            current.append(line).append("\n");
+        }
+        if (!current.isEmpty()) {
+            sections.add(current.toString().trim());
+        }
+        return sections;
+    }
+
+    /**
+     * 根据大纲 section 内容推断其对应的模板角色，然后按顺序分配 template_slide_index。
+     * 返回值: List<Integer>，每个元素是对应 section 的 template_slide_index。
+     */
+    private List<Integer> assignTemplateSlideIndexes(List<String> sections, TemplateAnalysis ta) {
+        List<Integer> assignments = new ArrayList<>();
+
+        // 各角色的可用索引队列（按模板中的顺序）
+        Queue<Integer> coverQueue = new LinkedList<>(ta.roleToIndexes().getOrDefault("cover", List.of()));
+        // toc 页面也加入 content 队列（可作为内容页使用）
+        Queue<Integer> sectionQueue = new LinkedList<>(ta.roleToIndexes().getOrDefault("section", List.of()));
+        Queue<Integer> contentQueue = new LinkedList<>(ta.roleToIndexes().getOrDefault("content", List.of()));
+        Queue<Integer> endingQueue = new LinkedList<>(ta.roleToIndexes().getOrDefault("ending", List.of()));
+
+        for (int i = 0; i < sections.size(); i++) {
+            String section = sections.get(i).trim();
+            String firstLine = section.split("\n")[0].trim();
+
+            Integer assigned = null;
+
+            if (firstLine.startsWith("# ") && !firstLine.startsWith("## ") && !firstLine.startsWith("### ")) {
+                // # 总标题 → cover
+                assigned = coverQueue.poll();
+                if (assigned == null) assigned = contentQueue.poll();
+            } else if (firstLine.startsWith("## ")) {
+                // ## 章节标题
+                boolean isEnding = i >= sections.size() - 2; // 最后1-2个 ## 视为结尾
+                String lower = firstLine.toLowerCase();
+                boolean looksLikeEnding = lower.contains("感谢") || lower.contains("总结")
+                        || lower.contains("thank") || lower.contains("q&a") || lower.contains("结语");
+
+                if ((isEnding || looksLikeEnding) && !endingQueue.isEmpty()) {
+                    assigned = endingQueue.poll();
+                } else {
+                    assigned = sectionQueue.poll();
+                    if (assigned == null) assigned = contentQueue.poll();
+                }
+            } else if (firstLine.startsWith("### ")) {
+                // ### 内容页 → content
+                assigned = contentQueue.poll();
+            }
+
+            // 兜底：用任何可用的 content 页，或用第一个模板页
+            if (assigned == null) {
+                assigned = contentQueue.poll();
+            }
+            if (assigned == null) {
+                // 全部用完了，循环使用 content 页
+                List<Integer> contentIndexes = ta.roleToIndexes().getOrDefault("content", List.of());
+                if (!contentIndexes.isEmpty()) {
+                    assigned = contentIndexes.get(i % contentIndexes.size());
+                } else {
+                    assigned = i % ta.totalPages();
+                }
+            }
+
+            assignments.add(assigned);
+        }
+
+        return assignments;
+    }
+
+    // ==================== 模板分析中间结构 ====================
+
+    /**
+     * 模板分析结果：按角色分组的页面索引映射 + 统计信息
+     * 作为中间量保存，供 PlannerAgent 和页面分配使用
+     */
+    record TemplateAnalysis(
+            int totalPages,
+            Map<String, List<Integer>> roleToIndexes,  // role → [index, index, ...]
+            int coverCount, int tocCount, int sectionCount, int contentCount,
+            int endingCount, int creditsCount
+    ) {
+        /** 可用于内容填充的 content 页数量 */
+        int usableContentPages() { return contentCount; }
+        /** 章节过渡页数量 */
+        int chapterCount() { return sectionCount; }
+    }
+
+    /**
+     * 解析模板 JSON 为 TemplateAnalysis 中间结构
+     */
+    private TemplateAnalysis analyzeTemplate(JsonNode templateRoot) {
+        JsonNode slides = templateRoot.path("slides");
+        Map<String, List<Integer>> roleToIndexes = new LinkedHashMap<>();
+        int cover = 0, toc = 0, section = 0, content = 0, ending = 0, credits = 0;
+
+        if (slides.isArray()) {
+            for (JsonNode slide : slides) {
+                int index = slide.path("index").asInt();
+                String role = slide.path("data").path("role").asText("content");
+                roleToIndexes.computeIfAbsent(role, k -> new ArrayList<>()).add(index);
+                switch (role) {
+                    case "cover" -> cover++;
+                    case "toc" -> toc++;
+                    case "section" -> section++;
+                    case "content" -> content++;
+                    case "ending" -> ending++;
+                    case "credits" -> credits++;
+                }
+            }
+        }
+
+        return new TemplateAnalysis(
+                templateRoot.path("slide_count").asInt(),
+                roleToIndexes, cover, toc, section, content, ending, credits);
+    }
+
+    /**
+     * 构建 PlannerAgent 的模板提示词（精准控制页数）
+     * 不列出所有页面细节，而是给出明确的数量要求 + 结构规范
+     */
+    private String buildTemplatePlannerPrompt(TemplateAnalysis ta) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("## Template Page Structure (%d pages total)\n\n", ta.totalPages()));
+
+        // List page distribution by role
+        sb.append("Page role distribution:\n");
+        if (ta.coverCount() > 0)
+            sb.append(String.format("- Cover: %d page(s)\n", ta.coverCount()));
+        if (ta.tocCount() > 0)
+            sb.append(String.format("- Table of Contents: %d page(s)\n", ta.tocCount()));
+        if (ta.sectionCount() > 0)
+            sb.append(String.format("- Section Transition: %d page(s)\n", ta.sectionCount()));
+        if (ta.contentCount() > 0)
+            sb.append(String.format("- Body Content: %d page(s)\n", ta.contentCount()));
+        if (ta.endingCount() > 0)
+            sb.append(String.format("- Ending: %d page(s)\n", ta.endingCount()));
+        if (ta.creditsCount() > 0)
+            sb.append(String.format("- Credits: %d page(s) (auto-filled, no planning needed)\n", ta.creditsCount()));
+
+        // Explicit outline structure requirements
+        int effectiveContentPages = ta.usableContentPages();
+        int chapters = ta.chapterCount();
+        int pagesPerChapter = chapters > 0 ? effectiveContentPages / chapters : effectiveContentPages;
+
+        sb.append(String.format("\n## Outline Structure Requirements (MUST follow strictly)\n\n"));
+        sb.append(String.format("You MUST generate an outline with the following structure:\n"));
+        sb.append(String.format("1. `# Main Title` — exactly 1, for the cover slide\n"));
+        if (chapters > 0) {
+            sb.append(String.format("2. `## Chapter Title` — exactly %d, each for a section transition slide\n", chapters));
+            sb.append(String.format("3. `### Content Page Title` — approximately %d per ## chapter (total %d), each for a body content slide\n",
+                    pagesPerChapter, effectiveContentPages));
+        } else {
+            sb.append(String.format("2. `### Content Page Title` — total %d, each for a body content slide\n", effectiveContentPages));
+        }
+        sb.append(String.format("4. The last `## Thank You / Summary` — for the ending slide\n\n"));
+
+        sb.append("Under each ###, write 2-4 bullet points (using - list format).\n");
+        sb.append("Do NOT annotate template_slide_index; the system assigns it automatically.\n");
+
+        return sb.toString();
+    }
+
+    /**
+     * 构建模板页结构摘要（精简版，供 PlannerAgent 规划大纲用）
+     * @deprecated 使用 buildTemplatePlannerPrompt + TemplateAnalysis 代替
+     */
+    @SuppressWarnings("unused")
+    private String buildTemplateSlideSummary(JsonNode templateRoot) {
+        TemplateAnalysis ta = analyzeTemplate(templateRoot);
+        return buildTemplatePlannerPrompt(ta);
+    }
+
+    /**
+     * 构建模板页结构描述（语义概览版，供 Agent 总览模板用）。
+     * 只输出语义信息（purpose/description/layout_type/content_capacity 等）和槽位数量摘要，
+     * 不暴露 shape_id 等细节。具体 shape 信息在 Agent 选定某页后通过 buildPerPageDescriptions 提供。
+     */
+    private String buildTemplateSlidesDescription(JsonNode templateRoot) {
+        JsonNode slides = templateRoot.path("slides");
+        if (!slides.isArray()) return "No template page info available";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Template Structure Overview ===\n");
+        sb.append(String.format("Total pages: %d, Slide dimensions: %dx%d EMU\n",
+                templateRoot.path("slide_count").asInt(),
+                templateRoot.path("slide_width").asInt(),
+                templateRoot.path("slide_height").asInt()));
+
+        // 模板级语义信息
+        String overallStyle = templateRoot.path("overall_style").asText("");
+        String templateDesc = templateRoot.path("template_description").asText("");
+        if (!overallStyle.isBlank()) {
+            sb.append(String.format("Overall style: %s\n", overallStyle));
+        }
+        if (!templateDesc.isBlank()) {
+            sb.append(String.format("Description: %s\n", templateDesc));
+        }
+        JsonNode topics = templateRoot.path("suitable_topics");
+        if (topics.isArray() && !topics.isEmpty()) {
+            sb.append("Suitable topics: ");
+            for (int i = 0; i < topics.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(topics.get(i).asText());
+            }
+            sb.append("\n");
+        }
+        String audienceLevel = templateRoot.path("audience_level").asText("");
+        String tone = templateRoot.path("tone").asText("");
+        if (!audienceLevel.isBlank()) sb.append(String.format("Audience: %s\n", audienceLevel));
+        if (!tone.isBlank()) sb.append(String.format("Tone: %s\n", tone));
+        sb.append("\n");
+
+        for (JsonNode slide : slides) {
+            int index = slide.path("index").asInt();
+            JsonNode dataNode = slide.path("data");
+            String role = dataNode.path("role").asText("content");
+            int fillableCount = dataNode.path("fillable_count").asInt(0);
+
+            sb.append(String.format("┌── Page %d [role=%s] ──┐\n", index, role));
+
+            String purpose = slide.path("purpose").asText("");
+            String description = slide.path("description").asText("");
+            String layoutType = slide.path("layout_type").asText("");
+            String contentCapacity = slide.path("content_capacity").asText("");
+            String visualStyle = slide.path("visual_style").asText("");
+            String recommendedUsage = slide.path("recommended_usage").asText("");
+
+            if (!purpose.isBlank()) sb.append(String.format("│ Purpose: %s\n", purpose));
+            if (!description.isBlank()) sb.append(String.format("│ Description: %s\n", description));
+            if (!layoutType.isBlank()) sb.append(String.format("│ Layout type: %s\n", layoutType));
+            if (!contentCapacity.isBlank()) sb.append(String.format("│ Content capacity: %s\n", contentCapacity));
+            if (!visualStyle.isBlank()) sb.append(String.format("│ Visual style: %s\n", visualStyle));
+            if (!recommendedUsage.isBlank()) sb.append(String.format("│ Recommended usage: %s\n", recommendedUsage));
+
+            // 新增语义字段
+            String textDensity = slide.path("text_density").asText("");
+            String designComplexity = slide.path("design_complexity").asText("");
+            String contentFormat = slide.path("suggested_content_format").asText("");
+            if (!textDensity.isBlank()) sb.append(String.format("│ Text density: %s\n", textDensity));
+            if (!designComplexity.isBlank()) sb.append(String.format("│ Design complexity: %s\n", designComplexity));
+            if (!contentFormat.isBlank()) sb.append(String.format("│ Content format: %s\n", contentFormat));
+
+            // 配色方案
+            JsonNode colorScheme = slide.path("color_scheme");
+            String primary = colorScheme.path("primary").asText("");
+            String bgColor = colorScheme.path("background").asText("");
+            if (!primary.isBlank() || !bgColor.isBlank()) {
+                sb.append(String.format("│ Colors: primary=%s, background=%s\n", primary, bgColor));
+            }
+
+            // 关键词
+            JsonNode keywords = slide.path("keywords");
+            if (keywords.isArray() && !keywords.isEmpty()) {
+                sb.append("│ Keywords: ");
+                for (int ki = 0; ki < keywords.size(); ki++) {
+                    if (ki > 0) sb.append(", ");
+                    sb.append(keywords.get(ki).asText());
+                }
+                sb.append("\n");
+            }
+
+            // 仅展示槽位摘要（数量），不暴露 shape_id 等细节
+            JsonNode textSlots = dataNode.path("text_slots");
+            JsonNode imageSlots = dataNode.path("image_slots");
+            int textCount = textSlots.isArray() ? textSlots.size() : 0;
+            int imgCount = imageSlots.isArray() ? imageSlots.size() : 0;
+            sb.append(String.format("│ Slots: %d text (fillable=%d), %d image\n",
+                    textCount, fillableCount, imgCount));
+
+            sb.append(String.format("└── End Page %d ──┘\n\n", index));
+        }
+
+        // Usage rules summary
+        sb.append("=== Usage Rules ===\n");
+        sb.append("1. template_slide_index MUST be one of the template page indexes listed above\n");
+        sb.append("2. shape_ids in fills MUST use only the shape_ids listed for that template page\n");
+        sb.append("3. Cover → fill title+subtitle; Section → fill chapter title; ");
+        sb.append("Content → fill title+bullet points; Ending → fill thank-you text\n");
+        sb.append("4. Slots with is_fillable=YES are the primary fill targets\n");
+        sb.append("5. Slots with role=label/section_number usually keep original text or minor tweaks\n");
+        sb.append("6. Detailed shape info (shape_ids, sizes, samples) will be provided per-page when generating each slide\n");
+
+        return sb.toString();
+    }
+
+    /**
+     * 构建每页的模板描述 Map（pageIndex → 单页描述字符串）。
+     * Agent 选中某页后获得：语义上下文 + 完整 shape 详情（shape_id/size/role/sample/fill hints）。
+     */
+    private Map<Integer, String> buildPerPageDescriptions(JsonNode templateRoot) {
+        Map<Integer, String> result = new LinkedHashMap<>();
+        JsonNode slides = templateRoot.path("slides");
+        if (!slides.isArray()) return result;
+
+        for (JsonNode slide : slides) {
+            int index = slide.path("index").asInt();
+            JsonNode dataNode = slide.path("data");
+            String role = dataNode.path("role").asText("content");
+            String layoutName = dataNode.path("layout_name").asText("");
+            int fillableCount = dataNode.path("fillable_count").asInt(0);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Template Page %d [role=%s, layout=\"%s\", fillable_slots=%d]\n",
+                    index, role, layoutName, fillableCount));
+
+            // 语义上下文
+            String purpose = slide.path("purpose").asText("");
+            String description = slide.path("description").asText("");
+            String contentCapacity = slide.path("content_capacity").asText("");
+            String visualStyle = slide.path("visual_style").asText("");
+            String recommendedUsage = slide.path("recommended_usage").asText("");
+            if (!purpose.isBlank()) sb.append(String.format("Purpose: %s\n", purpose));
+            if (!description.isBlank()) sb.append(String.format("Description: %s\n", description));
+            if (!contentCapacity.isBlank()) sb.append(String.format("Content capacity: %s\n", contentCapacity));
+            if (!visualStyle.isBlank()) sb.append(String.format("Visual style: %s\n", visualStyle));
+            if (!recommendedUsage.isBlank()) sb.append(String.format("Recommended usage: %s\n", recommendedUsage));
+
+            // 新增语义字段
+            String textDensity = slide.path("text_density").asText("");
+            String designComplexity = slide.path("design_complexity").asText("");
+            String emphasisArea = slide.path("emphasis_area").asText("");
+            String fontStyle = slide.path("font_style").asText("");
+            String contentFormat = slide.path("suggested_content_format").asText("");
+            if (!textDensity.isBlank()) sb.append(String.format("Text density: %s\n", textDensity));
+            if (!designComplexity.isBlank()) sb.append(String.format("Design complexity: %s\n", designComplexity));
+            if (!emphasisArea.isBlank()) sb.append(String.format("Emphasis area: %s\n", emphasisArea));
+            if (!fontStyle.isBlank()) sb.append(String.format("Font style: %s\n", fontStyle));
+            if (!contentFormat.isBlank()) sb.append(String.format("Content format: %s\n", contentFormat));
+
+            // 配色方案
+            JsonNode colorScheme = slide.path("color_scheme");
+            String primary = colorScheme.path("primary").asText("");
+            String bgColor = colorScheme.path("background").asText("");
+            String textColor = colorScheme.path("text").asText("");
+            if (!primary.isBlank() || !bgColor.isBlank()) {
+                sb.append(String.format("Colors: primary=%s, background=%s, text=%s\n",
+                        primary, bgColor, textColor));
+            }
+
+            sb.append("--- Shape details (data) ---\n");
+
+            // 完整的 text_slots 详情（含 shape_id / role / fillable / size / sample / fill hints）
+            JsonNode textSlots = dataNode.path("text_slots");
+            if (textSlots.isArray() && !textSlots.isEmpty()) {
+                sb.append("Text slots:\n");
+                for (JsonNode slot : textSlots) {
+                    int shapeId = slot.path("shape_id").asInt();
+                    String slotRole = slot.path("role").asText("body");
+                    boolean fillable = slot.path("is_fillable").asBoolean(false);
+                    String sampleText = slot.path("sample_text").asText("");
+                    int width = slot.path("width").asInt(0);
+                    int height = slot.path("height").asInt(0);
+                    String sizeCm = String.format("%.1fcm x %.1fcm",
+                            width / 914400.0, height / 914400.0);
+
+                    sb.append(String.format("  shape_id=%d, role=%s, fillable=%s, size=%s, sample=\"%s\"\n",
+                            shapeId, slotRole, fillable ? "YES" : "no", sizeCm, truncate(sampleText, 50)));
+
+                    String hint = switch (slotRole) {
+                        case "title" -> "    → Fill with the page title (concise, ≤15 chars)";
+                        case "subtitle" -> "    → Fill with subtitle or supplementary text";
+                        case "body" -> fillable
+                                ? "    → Fillable: use text for paragraph or items for bullet list"
+                                : "    → Body area";
+                        case "label" -> "    → Short label/number, keep original or use brief text";
+                        case "section_number" -> "    → Chapter number (e.g. PART 01), keep as-is";
+                        default -> "    → Fill as needed";
+                    };
+                    sb.append(hint).append("\n");
+                }
+            }
+
+            // 完整的 image_slots 详情
+            JsonNode imageSlots = dataNode.path("image_slots");
+            if (imageSlots.isArray() && !imageSlots.isEmpty()) {
+                sb.append("Image slots:\n");
+                for (JsonNode imgSlot : imageSlots) {
+                    int shapeId = imgSlot.path("shape_id").asInt();
+                    String name = imgSlot.path("name").asText("");
+                    int width = imgSlot.path("width").asInt(0);
+                    int height = imgSlot.path("height").asInt(0);
+                    String sizeCm = String.format("%.1fcm x %.1fcm",
+                            width / 914400.0, height / 914400.0);
+                    sb.append(String.format("  shape_id=%d, name=\"%s\", size=%s\n",
+                            shapeId, truncate(name, 20), sizeCm));
+                    sb.append("    → Can be replaced with AI-generated image via image_url\n");
+                }
+            }
+
+            result.put(index, sb.toString());
+        }
+        return result;
+    }
+
+    /**
+     * 将大纲 section 列表与模板页描述绑定，生成 enriched sections。
+     * 每个 section 的文本后追加 [TEMPLATE_PAGE] 块，包含该页的 template_slide_index 和详细 shape 描述。
+     */
+    private List<String> enrichSectionsWithTemplateInfo(
+            List<String> sections, List<Integer> templateIndexes, Map<Integer, String> pageDescriptions) {
+        List<String> enriched = new ArrayList<>();
+        for (int i = 0; i < sections.size(); i++) {
+            String section = sections.get(i);
+            int templateIdx = templateIndexes.get(i);
+            String pageDesc = pageDescriptions.getOrDefault(templateIdx, "");
+
+            StringBuilder sb = new StringBuilder(section);
+            sb.append("\n\n[TEMPLATE_PAGE]\n");
+            sb.append("template_slide_index=").append(templateIdx).append("\n");
+            sb.append(pageDesc);
+            sb.append("[/TEMPLATE_PAGE]\n");
+
+            enriched.add(sb.toString());
+        }
+        return enriched;
+    }
+
+    private String extractTitle(String markdown) {
+        for (String line : markdown.split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("# ")) {
+                return trimmed.substring(2).trim();
+            }
+        }
+        return "演示文稿";
+    }
+
+    /**
+     * 从 AI 输出中提取 JSON（可能包含 markdown 代码块标记）
+     */
+    private String extractJson(String text) {
+        // 尝试提取 ```json ... ``` 块
+        int start = text.indexOf("{");
+        int end = text.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+            return text.substring(start, end + 1);
+        }
+        return null;
+    }
+
+    /**
+     * 解析 AI 生成的单页 JSON（容错处理 markdown 代码块等）
+     */
+    private Map<String, Object> parseSlideJson(String rawJson) {
+        // 先尝试直接解析
+        try {
+            return objectMapper.readValue(rawJson, new TypeReference<>() {});
+        } catch (JsonProcessingException ignored) {}
+
+        // 尝试提取 JSON 块
+        String extracted = extractJson(rawJson);
+        if (extracted != null) {
+            try {
+                return objectMapper.readValue(extracted, new TypeReference<>() {});
+            } catch (JsonProcessingException ignored) {}
+        }
+        return null;
+    }
+
+    private Map<String, Object> parseTemplateJsonForFrontend(
+            String templateJson, String templateUrl,
+            PptServiceClient.RenderSlidesResult renderResult) {
+        try {
+            JsonNode root = objectMapper.readTree(templateJson);
+            Map<String, Object> result = new HashMap<>();
+            result.put("slideCount", root.path("slide_count").asInt());
+            result.put("templateUrl", templateUrl);
+
+            // 返回完整的 slide 结构（含 text_slots / image_slots）供前端渲染
+            List<Map<String, Object>> slideDetails = new ArrayList<>();
+            JsonNode slides = root.path("slides");
+            if (slides.isArray()) {
+                for (JsonNode slide : slides) {
+                    slideDetails.add(objectMapper.convertValue(
+                            slide, new TypeReference<Map<String, Object>>() {}));
+                }
+            }
+            result.put("slides", slideDetails);
+
+            // 附带渲染的幻灯片图片 URL
+            if (renderResult != null && renderResult.slideImages() != null) {
+                List<Map<String, Object>> images = new ArrayList<>();
+                for (PptServiceClient.SlideImage img : renderResult.slideImages()) {
+                    images.add(Map.of("index", img.index(), "imageUrl", img.imageUrl()));
+                }
+                result.put("slideImages", images);
+            }
+
+            return result;
+        } catch (Exception e) {
+            return Map.of("raw", templateJson);
+        }
+    }
+
+    private String truncate(String text, int maxLen) {
+        if (text == null) return "";
+        return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
+    }
+
+    private Long toLong(Object value) {
+        if (value == null) throw new BusinessException(40000, "缺少 sessionId");
+        if (value instanceof Number n) return n.longValue();
+        return Long.parseLong(value.toString());
+    }
+
+    // ==================== 会话管理 ====================
+
+    public List<Map<String, Object>> listSessions(Long userId) {
+        return sessionRepository.findByUserId(userId).stream().map(s -> {
+            Map<String, Object> map = new HashMap<>();
+            map.put("id", s.getId());
+            map.put("topic", s.getTopic());
+            map.put("state", s.getState().name());
+            map.put("resultUrl", s.getResultUrl());
+            map.put("projectId", s.getProjectId());
+            map.put("createTime", s.getCreateTime());
+            map.put("updateTime", s.getUpdateTime());
+            return map;
+        }).collect(java.util.stream.Collectors.toList());
+    }
+
+    public Map<String, Object> getSessionDetail(Long sessionId, Long userId) {
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        Map<String, Object> map = new HashMap<>();
+        map.put("id", session.getId());
+        map.put("topic", session.getTopic());
+        map.put("state", session.getState().name());
+        map.put("outlineMarkdown", session.getOutlineMarkdown());
+        map.put("outlineJson", session.getOutlineJson());
+        map.put("projectId", session.getProjectId());
+        map.put("templateId", session.getTemplateId());
+        map.put("templateUrl", session.getTemplateUrl());
+        map.put("templateJson", session.getTemplateJson());
+        map.put("slidesJson", session.getSlidesJson());
+        map.put("resultUrl", session.getResultUrl());
+        map.put("createTime", session.getCreateTime());
+        map.put("updateTime", session.getUpdateTime());
+        return map;
+    }
+
+    public void deleteSession(Long sessionId, Long userId) {
+        PptGenerationSession session = getSessionAndVerify(sessionId, userId);
+        sessionRepository.deleteById(session.getId());
+    }
+
+    // ==================== Markdown → OutlineJson 转换 ====================
+
+    /**
+     * 将 Markdown 大纲转换为结构化 JSON 格式
+     * Markdown 格式：# = PPT标题(cover), ## = 章节标题, ### = 内容页, - = 要点
+     */
+    private String convertMarkdownToOutlineJson(String markdown, String topic) {
+        try {
+            Map<String, Object> outline = new LinkedHashMap<>();
+            outline.put("title", topic);
+            outline.put("speaker", "");
+
+            List<Map<String, Object>> sections = new ArrayList<>();
+            String[] lines = markdown.split("\n");
+            Map<String, Object> currentChapter = null;
+            List<Map<String, Object>> currentPages = null;
+            Map<String, Object> currentPage = null;
+            List<String> currentBullets = null;
+            boolean hasCover = false;
+
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) continue;
+
+                if (trimmed.startsWith("# ")) {
+                    // 封面标题
+                    if (!hasCover) {
+                        String coverTitle = trimmed.substring(2).trim();
+                        outline.put("title", coverTitle);
+                        Map<String, Object> cover = new LinkedHashMap<>();
+                        cover.put("type", "cover");
+                        cover.put("title", coverTitle);
+                        sections.add(cover);
+                        hasCover = true;
+                    }
+                } else if (trimmed.startsWith("## ")) {
+                    // 保存上一个章节
+                    flushChapter(currentChapter, currentPages, currentPage, currentBullets, sections);
+                    currentPage = null;
+                    currentBullets = null;
+
+                    String sectionTitle = trimmed.substring(3).trim();
+                    // 判断是结尾页还是普通章节
+                    String lower = sectionTitle.toLowerCase();
+                    if (lower.contains("thank") || lower.contains("谢谢") || lower.contains("总结")
+                            || lower.contains("summary") || lower.contains("结语") || lower.contains("q&a")) {
+                        currentChapter = null;
+                        currentPages = null;
+                        Map<String, Object> ending = new LinkedHashMap<>();
+                        ending.put("type", "ending");
+                        ending.put("title", sectionTitle);
+                        sections.add(ending);
+                    } else {
+                        currentChapter = new LinkedHashMap<>();
+                        currentChapter.put("type", "chapter");
+                        currentChapter.put("chapterTitle", sectionTitle);
+                        currentPages = new ArrayList<>();
+                    }
+                } else if (trimmed.startsWith("### ")) {
+                    // 内容页标题
+                    if (currentPage != null && currentBullets != null && currentPages != null) {
+                        currentPage.put("bullets", new ArrayList<>(currentBullets));
+                        currentPages.add(currentPage);
+                    }
+                    currentPage = new LinkedHashMap<>();
+                    currentPage.put("title", trimmed.substring(4).trim());
+                    currentBullets = new ArrayList<>();
+                } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+                    // 要点
+                    if (currentBullets != null) {
+                        currentBullets.add(trimmed.substring(2).trim());
+                    }
+                }
+            }
+
+            // 保存最后一个章节
+            flushChapter(currentChapter, currentPages, currentPage, currentBullets, sections);
+
+            // 如果没有封面，添加默认封面
+            if (!hasCover) {
+                Map<String, Object> cover = new LinkedHashMap<>();
+                cover.put("type", "cover");
+                cover.put("title", topic);
+                sections.add(0, cover);
+            }
+
+            outline.put("sections", sections);
+
+            // 计算页数
+            int pageCount = 0;
+            for (Map<String, Object> s : sections) {
+                if ("chapter".equals(s.get("type"))) {
+                    @SuppressWarnings("unchecked")
+                    List<?> pages = (List<?>) s.get("pages");
+                    pageCount += pages != null ? pages.size() : 0;
+                } else {
+                    pageCount++;
+                }
+            }
+            outline.put("pageCount", pageCount);
+
+            return objectMapper.writeValueAsString(outline);
+        } catch (Exception e) {
+            log.warn("Markdown→JSON转换失败，返回简化JSON: {}", e.getMessage());
+            try {
+                return objectMapper.writeValueAsString(Map.of(
+                        "title", topic, "speaker", "", "pageCount", 0,
+                        "sections", List.of(Map.of("type", "cover", "title", topic))
+                ));
+            } catch (JsonProcessingException ex) {
+                return "{}";
+            }
+        }
+    }
+
+    private void flushChapter(Map<String, Object> chapter, List<Map<String, Object>> pages,
+                               Map<String, Object> currentPage, List<String> currentBullets,
+                               List<Map<String, Object>> sections) {
+        if (currentPage != null && currentBullets != null && pages != null) {
+            currentPage.put("bullets", new ArrayList<>(currentBullets));
+            pages.add(currentPage);
+        }
+        if (chapter != null && pages != null) {
+            chapter.put("pages", pages);
+            sections.add(chapter);
+        }
+    }
+
+    // ==================== 项目图片注入 ====================
+
+    /**
+     * 将项目图片设置到 ImageGenerationTool 的 ThreadLocal，供 DesignAgent 的 useProjectImage 工具使用
+     */
+    private void setupProjectImages(PptGenerationSession session) {
+        if (session.getProjectId() == null) return;
+        try {
+            List<PptProjectService.ProjectImageInfo> images = pptProjectService.getProjectImageInfos(session.getProjectId());
+            if (!images.isEmpty()) {
+                List<com.novacloudedu.backend.infrastructure.ai.agent.ImageGenerationTool.ProjectImage> toolImages =
+                        images.stream()
+                                .map(i -> new com.novacloudedu.backend.infrastructure.ai.agent.ImageGenerationTool.ProjectImage(
+                                        i.fileName(), i.fileUrl(), i.fileType()))
+                                .toList();
+                imageGenerationTool.setProjectImages(toolImages);
+                log.info("已注入 {} 张项目图片到 DesignAgent 上下文", toolImages.size());
+            }
+        } catch (Exception e) {
+            log.warn("加载项目图片失败: {}", e.getMessage());
+        }
+    }
+
+    private void clearProjectImages() {
+        try {
+            imageGenerationTool.clearProjectImages();
+        } catch (Exception ignored) {}
+    }
+
+    // ==================== SSE 工具方法 ====================
+
+    /**
+     * 创建 SseEmitter 并注册生命周期回调，返回 emitter 和 alive 标志
+     */
+    private record EmitterHolder(SseEmitter emitter, AtomicBoolean alive) {}
+
+    private EmitterHolder createEmitter(long timeout) {
+        SseEmitter emitter = new SseEmitter(timeout);
+        AtomicBoolean alive = new AtomicBoolean(true);
+        emitter.onCompletion(() -> alive.set(false));
+        emitter.onError(e -> alive.set(false));
+        emitter.onTimeout(() -> alive.set(false));
+        return new EmitterHolder(emitter, alive);
+    }
+
+    private void sendEvent(SseEmitter emitter, AtomicBoolean alive, String name, Object data) throws IOException {
+        if (!alive.get()) return;
+        try {
+            emitter.send(SseEmitter.event().name(name).data(data));
+        } catch (IOException e) {
+            alive.set(false);
+            throw e;
+        }
+    }
+
+    private void sendDone(SseEmitter emitter, AtomicBoolean alive) {
+        if (!alive.get()) return;
+        try {
+            emitter.send(SseEmitter.event().name("done").data("[DONE]"));
+            emitter.complete();
+        } catch (IOException e) {
+            alive.set(false);
+            log.debug("客户端已断开，跳过 done 事件");
+        }
+    }
+
+    private void handleError(SseEmitter emitter, AtomicBoolean alive, PptGenerationSession session, Exception e) {
+        // 判断是否为客户端断开连接（Broken pipe），此类异常不应标记会话为失败
+        boolean isClientDisconnect = isBrokenPipe(e);
+        if (isClientDisconnect) {
+            log.info("PPT生成：客户端已断开连接 (Broken pipe), sessionId={}", session.getId());
+        } else {
+            log.error("PPT生成异常: sessionId={}", session.getId(), e);
+            session.failed();
+            try {
+                sessionRepository.save(session);
+            } catch (Exception ex) {
+                log.error("保存失败状态异常", ex);
+            }
+        }
+        if (alive.get()) {
+            try {
+                emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
+            } catch (IOException ioException) {
+                log.debug("客户端已断开，无法发送错误消息");
+            }
+            try {
+                // The error has already been sent as an SSE event. Completing with
+                // an exception makes Spring try to render a JSON error after the
+                // response is committed as text/event-stream, which surfaces as a
+                // misleading browser-level network error.
+                emitter.complete();
+            } catch (Exception ignored) {}
+        }
+        alive.set(false);
+    }
+
+    private boolean isBrokenPipe(Throwable e) {
+        if (e == null) return false;
+        String msg = e.getMessage();
+        if (msg != null && msg.contains("Broken pipe")) return true;
+        String className = e.getClass().getSimpleName();
+        if ("AsyncRequestNotUsableException".equals(className)) return true;
+        return isBrokenPipe(e.getCause());
+    }
+
+}

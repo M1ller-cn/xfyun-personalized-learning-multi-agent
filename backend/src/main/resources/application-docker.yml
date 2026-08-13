@@ -1,0 +1,36 @@
+# =================================================================
+# NovaCloudEdu — Docker 容器环境覆盖
+# 仅覆盖容器内服务地址（容器名替代 localhost）
+# 所有密钥/API Key 通过环境变量直接注入 application.yml 的 ${} 占位符
+# =================================================================
+
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:postgres}:${DB_PORT:5432}/${DB_NAME:novacloudedu}?stringtype=unspecified
+    username: ${DB_USERNAME:nova}
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+  neo4j:
+    uri: bolt://${NEO4J_HOST:neo4j}:${NEO4J_BOLT_PORT:7687}
+  elasticsearch:
+    uris: http://${ES_HOST:elasticsearch}:${ES_PORT:9200}
+
+# ---- 容器内服务地址 ----
+ppt-service:
+  url: ${PPT_SERVICE_URL:http://ppt-service:8100}
+
+typst:
+  service:
+    url: ${TYPST_SERVICE_URL:http://typst-service:8200}
+
+onlyoffice:
+  document-server-url: ${ONLYOFFICE_URL:http://onlyoffice:80}
+
+srs:
+  rtmp-url: ${SRS_RTMP_URL:rtmp://srs:1935/live}
+
+# ---- 日志：容器环境 INFO ----
+logging:
+  level:
+    com.novacloudedu: ${LOG_LEVEL:INFO}

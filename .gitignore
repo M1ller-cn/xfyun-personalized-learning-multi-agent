@@ -1,0 +1,73 @@
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Java / Maven
+backend/target/
+*.class
+*.log
+
+# Node / React
+web/node_modules/
+web/dist/
+web/.vite/
+npm-debug.log*
+
+# Flutter / Android / iOS generated files
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.RData
+app/.Rhistory
+app/build/
+app/android/.gradle/
+app/android/build/
+app/android/local.properties
+app/ios/Pods/
+app/ios/.symlinks/
+app/ios/Flutter/ephemeral/
+app/ios/Flutter/Generated.xcconfig
+app/ios/Flutter/flutter_export_environment.sh
+
+# Python and generated services
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/venv/
+**/.venv/
+
+# Docker runtime data and editor files
+docker/data/
+docker/volumes/
+.vscode/*.log
+.idea/
+
+# Local recordings, exports and generated documents
+*.mp4
+*.mov
+*.avi
+*.webm
+*.apk
+*.aab
+*.pptx
+*.pdf
+
+# Private production metadata and competition-only presentation materials
+video-intro/
+docs/competition-adaptation-plan.md
+docs/novacloudedu-reproduction.md
+数据集与模型部署配置/
+
+# Oversized local presentation capture (keep it locally, do not publish it)
+assets/web/management/web端-PPT生成助手演示.gif
+
+# OS files
+.DS_Store
+Thumbs.db

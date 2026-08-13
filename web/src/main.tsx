@@ -1,0 +1,212 @@
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import './index.css'
+import App from './App.tsx'
+import { ThemeProvider } from './context/ThemeContext.tsx'
+import { LoginPage, RegisterPage } from './pages'
+import VisitorPortalPage from './pages/VisitorPortalPage'
+import { ProtectedRoute } from './components/ProtectedRoute'
+import { AdminLayout } from './components/layout/AdminLayout'
+import { UserManagementPage } from './pages/admin/UserManagementPage'
+import { ScraperConfigPage } from './pages/admin/ScraperConfigPage'
+import { ScraperTaskPage } from './pages/admin/ScraperTaskPage'
+import { DailyWordManagementPage } from './pages/admin/DailyWordManagementPage'
+import { DailyArticleManagementPage } from './pages/admin/DailyArticleManagementPage'
+import { AnnouncementManagementPage } from './pages/admin/AnnouncementManagementPage'
+import { BannerManagementPage } from './pages/admin/BannerManagementPage'
+import { FeedbackManagementPage } from './pages/admin/FeedbackManagementPage'
+import { PostManagementPage } from './pages/admin/PostManagementPage'
+import { KnowledgeBaseManagementPage } from './pages/admin/KnowledgeBaseManagementPage'
+import { AiAssistantManagementPage } from './pages/admin/AiAssistantManagementPage'
+import { WorkflowManagementPage } from './pages/admin/WorkflowManagementPage'
+import { WorkflowEditorPage } from './pages/admin/workflow/WorkflowEditorPage'
+import { McpServerManagementPage } from './pages/admin/McpServerManagementPage'
+import PptTemplateManagementPage from './pages/admin/PptTemplateManagementPage'
+import PptGeneratorPage from './pages/admin/PptGeneratorPage'
+import PptEditorPage from './pages/admin/PptEditorPage'
+import { QuestionManagementPage } from './pages/admin/QuestionManagementPage'
+import { ExamPaperManagementPage } from './pages/admin/ExamPaperManagementPage'
+import { ExamTemplateManagementPage } from './pages/admin/ExamTemplateManagementPage'
+import { CourseManagementPage } from './pages/admin/CourseManagementPage'
+import { CourseDetailPage } from './pages/admin/CourseDetailPage'
+import { TeacherManagementPage } from './pages/admin/TeacherManagementPage'
+import { ClassManagementPage } from './pages/admin/ClassManagementPage'
+import { GroupManagementPage } from './pages/admin/GroupManagementPage'
+import { BookManagementPage } from './pages/admin/BookManagementPage'
+import { MembershipManagementPage } from './pages/admin/MembershipManagementPage'
+import { OrderManagementPage } from './pages/admin/OrderManagementPage'
+import { DashboardPage } from './pages/admin/DashboardPage'
+import LearningAnalyticsPage from './pages/admin/LearningAnalyticsPage'
+import { PlatformReadinessPage } from './pages/admin/PlatformReadinessPage'
+import CourseLessonPage from './pages/CourseLessonPage'
+import EbookReaderPage from './pages/EbookReaderPage'
+import { getToken } from './api'
+import { useEffect } from 'react'
+import { RtcProvider } from './context/RtcContext'
+import IncomingCallModal from './components/call/IncomingCallModal'
+import CallScreen from './components/call/CallScreen'
+import MobileLearningAppPage from './pages/MobileLearningAppPage'
+
+// 路由切换时滚动到顶部
+const ScrollToTop = () => {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
+  return null;
+};
+
+// 初始重定向组件 - 仅在首次进入时根据角色分流
+const InitialRedirect = () => {
+  const token = getToken();
+  if (!token) return <Navigate to="/visitor" replace />;
+  
+  const userInfoStr = localStorage.getItem('user_info');
+  const userInfo = userInfoStr ? JSON.parse(userInfoStr) : null;
+  const userRole = userInfo?.userRole || userInfo?.role;
+  
+  const role = userRole?.toLowerCase();
+  if (role === 'admin' || role === 'teacher') {
+    return <Navigate to="/admin" replace />;
+  }
+  return <Navigate to="/" replace />;
+};
+
+const RootGateway = () => {
+  const token = getToken();
+  if (!token) return <VisitorPortalPage />;
+
+  const userInfoStr = localStorage.getItem('user_info');
+  const userInfo = userInfoStr ? JSON.parse(userInfoStr) : null;
+  const role = String(userInfo?.userRole || userInfo?.role || '').toLowerCase();
+
+  if (role === 'admin' || role === 'teacher') {
+    return <Navigate to="/admin" replace />;
+  }
+
+  return (
+    <ProtectedRoute>
+      <App />
+    </ProtectedRoute>
+  );
+};
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <ThemeProvider>
+      <RtcProvider>
+      <BrowserRouter>
+        <ScrollToTop />
+        <Routes>
+          {/* 公开路由 */}
+          <Route path="/" element={<RootGateway />} />
+          <Route path="/visitor" element={<VisitorPortalPage />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/mobile-demo" element={<MobileLearningAppPage />} />
+          
+          {/* 初始进入重定向 */}
+          <Route path="/entry" element={<InitialRedirect />} />
+          
+          {/* 工作流编辑器 - 全屏画布，不套 AdminLayout */}
+          <Route
+            path="/admin/workflows/:id/edit"
+            element={
+              <ProtectedRoute requireAdmin>
+                <WorkflowEditorPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* PPT在线编辑器 - 全屏，不套 AdminLayout */}
+          <Route
+            path="/admin/ppt-editor"
+            element={
+              <ProtectedRoute requireAdmin>
+                <PptEditorPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* 上课页面 - 全屏沉浸式，不套用户 App 壳 */}
+          <Route
+            path="/course/:courseId/learn"
+            element={
+              <ProtectedRoute>
+                <CourseLessonPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* 电子书阅读器 - 全屏沉浸式 */}
+          <Route
+            path="/book/:bookId/read"
+            element={
+              <ProtectedRoute>
+                <EbookReaderPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* 管理员路由 */}
+          <Route 
+            path="/admin/*" 
+            element={
+              <ProtectedRoute requireAdmin>
+                <AdminLayout>
+                  <Routes>
+                    <Route index element={<DashboardPage />} />
+                    <Route path="users" element={<UserManagementPage />} />
+                    <Route path="courses" element={<CourseManagementPage />} />
+                    <Route path="courses/:courseId" element={<CourseDetailPage />} />
+                    <Route path="teachers" element={<TeacherManagementPage />} />
+                    <Route path="classes" element={<ClassManagementPage />} />
+                    <Route path="learning-analytics" element={<LearningAnalyticsPage />} />
+                    <Route path="groups" element={<GroupManagementPage />} />
+                    <Route path="ebooks" element={<BookManagementPage />} />
+                    <Route path="scraper/config" element={<ScraperConfigPage />} />
+                    <Route path="scraper/tasks" element={<ScraperTaskPage />} />
+                    <Route path="daily-words" element={<DailyWordManagementPage />} />
+                    <Route path="daily-articles" element={<DailyArticleManagementPage />} />
+                    <Route path="announcements" element={<AnnouncementManagementPage />} />
+                    <Route path="banners" element={<BannerManagementPage />} />
+                    <Route path="feedbacks" element={<FeedbackManagementPage />} />
+                    <Route path="posts" element={<PostManagementPage />} />
+                    <Route path="ai-assistants" element={<AiAssistantManagementPage />} />
+                    <Route path="knowledge-bases" element={<KnowledgeBaseManagementPage />} />
+                    <Route path="workflows" element={<WorkflowManagementPage />} />
+                    <Route path="mcp-servers" element={<McpServerManagementPage />} />
+                    <Route path="ppt-templates" element={<PptTemplateManagementPage />} />
+                    <Route path="ppt-generator" element={<PptGeneratorPage />} />
+                    <Route path="questions" element={<QuestionManagementPage />} />
+                    <Route path="exam-papers" element={<ExamPaperManagementPage />} />
+                    <Route path="exam-templates" element={<ExamTemplateManagementPage />} />
+                    <Route path="membership" element={<MembershipManagementPage />} />
+                    <Route path="orders" element={<OrderManagementPage />} />
+                    <Route path="settings" element={<div className="p-8 bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm"><h2 className="text-2xl font-bold">系统设置 (开发中...)</h2></div>} />
+                    <Route path="platform-readiness" element={<PlatformReadinessPage />} />
+                  </Routes>
+                </AdminLayout>
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* 普通用户路由 - 管理员也可访问（主页为/） */}
+          <Route 
+            path="/*" 
+            element={
+              <ProtectedRoute>
+                <App />
+              </ProtectedRoute>
+            } 
+          />
+        </Routes>
+        {/* 全局通话 UI（覆盖所有页面，包括管理后台） */}
+        <IncomingCallModal />
+        <CallScreen />
+      </BrowserRouter>
+      </RtcProvider>
+    </ThemeProvider>
+  </StrictMode>,
+)

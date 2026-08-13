@@ -1,0 +1,291 @@
+.digital-human-coach {
+  width: 336px;
+  min-width: 316px;
+  height: 100%;
+  padding: 14px;
+  border-left: 1px solid rgba(226, 232, 240, 0.9);
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(239, 246, 255, 0.72)),
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.16), transparent 42%);
+}
+
+.dark .digital-human-coach {
+  border-left-color: rgba(31, 41, 55, 0.9);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(8, 47, 73, 0.48)),
+    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.18), transparent 42%);
+}
+
+.digital-human-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(191, 219, 254, 0.9);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(18px);
+}
+
+.dark .digital-human-card {
+  border-color: rgba(30, 64, 175, 0.42);
+  background: rgba(15, 23, 42, 0.78);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.26);
+}
+
+.digital-human-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 18px 12px;
+}
+
+.digital-human-eyebrow {
+  margin: 0 0 4px;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.digital-human-topbar h2 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.dark .digital-human-topbar h2 {
+  color: #f8fafc;
+}
+
+.digital-human-icon-button {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(191, 219, 254, 0.9);
+  border-radius: 12px;
+  color: #2563eb;
+  background: rgba(239, 246, 255, 0.82);
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.digital-human-icon-button:hover {
+  transform: translateY(-1px);
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.16);
+}
+
+.digital-human-stage {
+  position: relative;
+  flex: 1;
+  min-height: 420px;
+  margin: 0 14px;
+  overflow: hidden;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(219, 234, 254, 0.28), rgba(15, 23, 42, 0.94)),
+    linear-gradient(135deg, #e0f2fe, #dbeafe);
+  isolation: isolate;
+}
+
+.digital-human-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent 55%, rgba(15, 23, 42, 0.56)),
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.08) 0 1px, transparent 1px 42px);
+}
+
+.digital-human-sdk-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+/* 魔珐 SDK 会改写挂载节点的定位；外层负责稳定撑满整个舞台。 */
+.digital-human-sdk-mount {
+  width: 100%;
+  height: 100%;
+}
+
+.digital-human-sdk-mount canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.digital-human-embed {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.digital-human-fallback {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.digital-human-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  filter: saturate(1.02) contrast(1.02);
+}
+
+.digital-human-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.04), rgba(15, 23, 42, 0.62)),
+    radial-gradient(circle at 50% 34%, transparent 0 36%, rgba(59, 130, 246, 0.18) 78%);
+}
+
+.digital-human-loading {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 18px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid rgba(191, 219, 254, 0.38);
+  border-radius: 10px;
+  color: #eff6ff;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(10px);
+}
+
+.digital-human-loading strong {
+  color: #67e8f9;
+  font-variant-numeric: tabular-nums;
+}
+
+.digital-human-pulse {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 4;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: linear-gradient(135deg, #2563eb, #06b6d4);
+  box-shadow: 0 0 0 8px rgba(37, 99, 235, 0.14), 0 16px 32px rgba(15, 23, 42, 0.22);
+}
+
+.digital-human-pulse.is-speaking {
+  animation: digitalHumanPulse 1s ease-in-out infinite;
+}
+
+.digital-human-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px 0;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dark .digital-human-meta {
+  color: #cbd5e1;
+}
+
+.digital-human-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.digital-human-dot.status-ready,
+.digital-human-dot.status-speaking {
+  background: #10b981;
+  box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.12);
+}
+
+.digital-human-dot.status-loading {
+  background: #3b82f6;
+  box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.12);
+}
+
+.digital-human-dot.status-fallback,
+.digital-human-dot.status-error {
+  background: #f59e0b;
+  box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.12);
+}
+
+.digital-human-thinking {
+  margin-left: auto;
+  color: #2563eb;
+  font-size: 12px;
+}
+
+.digital-human-script {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 10px;
+  margin: 12px 18px 18px;
+  padding: 14px;
+  border: 1px solid rgba(219, 234, 254, 0.9);
+  border-radius: 16px;
+  color: #334155;
+  background: rgba(248, 250, 252, 0.84);
+}
+
+.dark .digital-human-script {
+  border-color: rgba(30, 64, 175, 0.42);
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.digital-human-script p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.digital-human-error {
+  margin: -8px 18px 16px;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@keyframes digitalHumanPulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 8px rgba(37, 99, 235, 0.14), 0 16px 32px rgba(15, 23, 42, 0.22);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: 0 0 0 15px rgba(37, 99, 235, 0.06), 0 16px 32px rgba(15, 23, 42, 0.22);
+  }
+}
+
+@media (max-width: 1180px) {
+  .digital-human-coach {
+    display: none;
+  }
+}

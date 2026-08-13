@@ -1,0 +1,799 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+@plugin "@tailwindcss/typography";
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* 品牌主色调 (Blue) */
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-300: #93c5fd;
+  --color-brand-400: #60a5fa;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-800: #1e40af;
+  --color-brand-900: #1e3a8a;
+  --color-brand-950: #172554;
+
+  /* 辅助色 (Cyan/Indigo) 用于渐变和点缀 */
+  --color-accent-50: #ecfeff;
+  --color-accent-100: #cffafe;
+  --color-accent-200: #a5f3fc;
+  --color-accent-300: #67e8f9;
+  --color-accent-400: #22d3ee;
+  --color-accent-500: #06b6d4;
+  --color-accent-600: #0891b2;
+  
+  --color-highlight-50: #eef2ff;
+  --color-highlight-100: #e0e7ff;
+  --color-highlight-200: #c7d2fe;
+  --color-highlight-300: #a5b4fc;
+  --color-highlight-400: #818cf8;
+  --color-highlight-500: #6366f1;
+  --color-highlight-600: #4f46e5;
+
+  /* 状态颜色 */
+  --color-success: var(--color-emerald-500);
+  --color-success-bg: var(--color-emerald-50);
+  --color-success-dark: var(--color-emerald-600);
+  
+  --color-warning: var(--color-amber-500);
+  --color-warning-bg: var(--color-amber-50);
+  --color-warning-dark: var(--color-amber-600);
+  
+  --color-error: var(--color-rose-500);
+  --color-error-bg: var(--color-rose-50);
+  --color-error-dark: var(--color-rose-600);
+
+  --color-info: var(--color-brand-500);
+  --color-info-bg: var(--color-brand-50);
+}
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  /* Apply base theme colors matching App.tsx */
+  @apply bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100 transition-colors duration-300;
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-20px) rotate(5deg);
+  }
+}
+
+/* ========================================
+   表格样式规范 - 文本截断与Tooltip
+   ======================================== */
+
+/* 表格单元格文本截断基础样式 */
+.table-cell-truncate {
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+
+/* 不同宽度的截断变体 */
+.table-cell-truncate-sm {
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+
+.table-cell-truncate-md {
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+
+.table-cell-truncate-lg {
+  max-width: 300px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+
+.table-cell-truncate-xl {
+  max-width: 400px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+
+/* 表格行内使用的快捷类 */
+.td-truncate {
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 表格整体样式优化 */
+table.admin-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+table.admin-table th,
+table.admin-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 自定义滚动条样式 */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #4b5563;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* ========================================
+   社区富文本编辑器与文章内容
+   ======================================== */
+.community-editor-content {
+  @apply text-base sm:text-lg text-gray-900 dark:text-gray-100 leading-8 font-medium;
+}
+
+.community-editor-content .tiptap {
+  min-height: 480px;
+  outline: none;
+}
+
+.community-editor-content .tiptap > * + *,
+.community-rendered-content > * + * {
+  margin-top: 0.9em;
+}
+
+.community-editor-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  @apply text-gray-300 dark:text-gray-700;
+}
+
+.community-editor-content h1,
+.community-rendered-content h1 {
+  @apply text-2xl font-black text-gray-950 dark:text-white leading-tight mt-7 mb-3;
+}
+
+.community-editor-content h2,
+.community-rendered-content h2 {
+  @apply text-xl font-black text-gray-950 dark:text-white leading-snug mt-6 mb-2;
+}
+
+.community-editor-content h3,
+.community-rendered-content h3 {
+  @apply text-lg font-bold text-gray-950 dark:text-white leading-snug mt-5 mb-2;
+}
+
+.community-editor-content p,
+.community-rendered-content p {
+  @apply leading-8;
+}
+
+.community-editor-content ul,
+.community-rendered-content ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+
+.community-editor-content ol,
+.community-rendered-content ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+}
+
+.community-editor-content li,
+.community-rendered-content li {
+  display: list-item;
+  padding-left: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.community-editor-content li p,
+.community-rendered-content li p {
+  margin: 0;
+}
+
+.community-editor-content blockquote,
+.community-rendered-content blockquote {
+  @apply border-l-4 border-brand-200 dark:border-brand-800 pl-4 py-1 text-gray-600 dark:text-gray-400 italic bg-brand-50/40 dark:bg-brand-950/20 rounded-r-lg;
+}
+
+.community-editor-content code,
+.community-rendered-content code {
+  @apply px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-sm font-mono text-brand-600 dark:text-brand-400;
+}
+
+.community-editor-content pre,
+.community-rendered-content pre {
+  @apply bg-gray-950 text-gray-100 rounded-xl p-4 overflow-x-auto text-sm leading-7;
+}
+
+.community-editor-content pre code,
+.community-rendered-content pre code {
+  @apply bg-transparent text-inherit p-0;
+}
+
+.community-editor-content a,
+.community-rendered-content a,
+.community-content-link {
+  @apply text-brand-600 dark:text-brand-400 underline underline-offset-4 decoration-brand-300 dark:decoration-brand-700;
+}
+
+.community-editor-content img,
+.community-rendered-content img,
+.community-content-image {
+  @apply rounded-xl max-w-full my-4 border border-gray-100 dark:border-gray-800;
+}
+
+/* ========================================
+   PPT 生成助手动画
+   ======================================== */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(15px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInDown {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes slideOutLeft {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(-30px); }
+}
+@keyframes slideOutRight {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(30px); }
+}
+@keyframes bounceIn {
+  0% { opacity: 0; transform: scale(0.3); }
+  50% { opacity: 1; transform: scale(1.05); }
+  70% { transform: scale(0.95); }
+  100% { transform: scale(1); }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-fadeIn { animation: fadeIn 300ms ease-out forwards; }
+.animate-fadeOut { animation: fadeOut 200ms ease-out forwards; }
+.animate-fadeInUp { animation: fadeInUp 400ms ease-out forwards; }
+.animate-slideInDown { animation: slideInDown 400ms ease-out forwards; }
+.animate-slideInLeft { animation: slideInLeft 400ms ease-out forwards; }
+.animate-slideInRight { animation: slideInRight 300ms ease-out forwards; }
+.animate-slideOutLeft { animation: slideOutLeft 250ms ease-out forwards; }
+.animate-slideOutRight { animation: slideOutRight 250ms ease-out forwards; }
+.animate-bounceIn { animation: bounceIn 500ms ease-out forwards; }
+.animate-scaleIn { animation: scaleIn 500ms ease-out forwards; }
+.animate-cursorBlink { animation: cursorBlink 1s step-end infinite; }
+
+.animate-shimmer {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+.dark .animate-shimmer {
+  background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
+  background-size: 200% 100%;
+}
+
+/* ========================================
+   Artplayer.js 自定义主题样式
+   ======================================== */
+
+/* --- 播放器容器 --- */
+.art-video-player {
+  --art-theme: #3b82f6;
+  --art-font-color: #ffffff;
+  --art-background-color: rgba(0, 0, 0, 0.85);
+  --art-text-shadow-color: rgba(0, 0, 0, 0.5);
+  --art-padding: 12px;
+  --art-border-radius: 0px;
+  --art-progress-height: 4px;
+  --art-progress-color: rgba(255, 255, 255, 0.3);
+  --art-hover-color: rgba(59, 130, 246, 0.6);
+  --art-loaded-color: rgba(255, 255, 255, 0.5);
+  --art-bottom-height: 50px;
+  --art-bottom-gap: 14px;
+  --art-control-height: 38px;
+  --art-control-opacity: 0.85;
+  --art-control-icon-size: 24px;
+  --art-control-icon-scale: 1;
+  --art-indicator-size: 14px;
+  --art-indicator-scale: 1;
+  --art-volume-height: 120px;
+  --art-volume-handle-size: 14px;
+  --art-lock-size: 30px;
+  --art-settings-icon-size: 22px;
+  --art-settings-max-height: 320px;
+  --art-widget-background: rgba(15, 23, 42, 0.92);
+  --art-tip-background: rgba(15, 23, 42, 0.88);
+  --art-scrollbar-size: 5px;
+  --art-scrollbar-background: rgba(255, 255, 255, 0.15);
+  --art-scrollbar-background-hover: rgba(255, 255, 255, 0.3);
+  --art-mini-progress-height: 3px;
+  --art-transition-duration: 0.2s;
+  font-family: Inter, system-ui, -apple-system, sans-serif !important;
+}
+
+/* --- 进度条区域 --- */
+.art-video-player .art-progress-bar {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.art-video-player .art-progress-played {
+  background: linear-gradient(90deg, #2563eb, #3b82f6, #60a5fa) !important;
+  border-radius: 6px;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.6);
+}
+
+.art-video-player .art-progress-loaded {
+  background: rgba(255, 255, 255, 0.35) !important;
+  border-radius: 6px;
+}
+
+/* 进度条指示器 */
+.art-video-player .art-progress-indicator {
+  border: 2px solid #ffffff;
+  background: #3b82f6 !important;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.art-video-player .art-progress:hover .art-progress-indicator {
+  transform: scale(1.3);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.7);
+}
+
+/* 进度条预览时间提示 */
+.art-video-player .art-progress-tip {
+  background: var(--art-tip-background) !important;
+  border-radius: 8px !important;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  font-weight: 500;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* --- 底部控制栏 --- */
+.art-video-player .art-bottom {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75) 0%, rgba(0, 0, 0, 0.4) 60%, transparent 100%) !important;
+  padding-bottom: 6px !important;
+}
+
+.art-video-player .art-controls {
+  gap: 2px;
+}
+
+/* 控制按钮通用 */
+.art-video-player .art-control {
+  opacity: 0.9;
+  transition: opacity 0.2s ease, transform 0.15s ease;
+}
+
+.art-video-player .art-control:hover {
+  opacity: 1;
+  transform: scale(1.08);
+}
+
+/* 进度条不应用缩放，避免点击位置与视觉位置不一致 */
+.art-video-player .art-control.art-control-progress:hover {
+  transform: none;
+}
+
+/* 播放按钮特殊强调 */
+.art-video-player .art-control-playAndPause:hover svg,
+.art-video-player .art-control[data-index="playAndPause"]:hover svg {
+  filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.5));
+}
+
+/* 音量滑块 */
+.art-video-player .art-volume-panel {
+  background: var(--art-widget-background) !important;
+  border-radius: 10px !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.art-video-player .art-volume-slider .art-volume-inner {
+  background: linear-gradient(to top, #3b82f6, #60a5fa) !important;
+  border-radius: 4px;
+}
+
+.art-video-player .art-volume-slider .art-volume-handle {
+  background: #ffffff !important;
+  border: 2px solid #3b82f6 !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+/* --- 时间显示 --- */
+.art-video-player .art-control-time {
+  font-size: 12px !important;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+/* --- 中央播放状态图标 --- */
+.art-video-player .art-state {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.art-video-player .art-state svg {
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.4));
+}
+
+/* --- 设置面板 --- */
+.art-video-player .art-settings {
+  background: var(--art-widget-background) !important;
+  border-radius: 12px !important;
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4) !important;
+  overflow: hidden;
+}
+
+.art-video-player .art-setting-item {
+  padding: 10px 16px !important;
+  transition: background 0.15s ease;
+}
+
+.art-video-player .art-setting-item:hover {
+  background: rgba(59, 130, 246, 0.12) !important;
+}
+
+.art-video-player .art-setting-item-left-icon svg {
+  width: 18px;
+  height: 18px;
+  opacity: 0.7;
+}
+
+.art-video-player .art-setting-item-right-tooltip {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+/* 选择器面板 */
+.art-video-player .art-selector-list {
+  background: var(--art-widget-background) !important;
+  border-radius: 10px !important;
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35) !important;
+}
+
+.art-video-player .art-selector-item {
+  padding: 8px 16px !important;
+  transition: background 0.15s ease;
+  font-size: 13px;
+}
+
+.art-video-player .art-selector-item:hover {
+  background: rgba(59, 130, 246, 0.12) !important;
+}
+
+.art-video-player .art-selector-item.art-current {
+  color: #60a5fa !important;
+}
+
+/* --- 右键菜单 --- */
+.art-video-player .art-contextmenus {
+  background: var(--art-widget-background) !important;
+  border-radius: 12px !important;
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45) !important;
+  padding: 6px 0 !important;
+  overflow: hidden;
+}
+
+.art-video-player .art-contextmenu {
+  padding: 8px 18px !important;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.art-video-player .art-contextmenu:hover {
+  background: rgba(59, 130, 246, 0.12) !important;
+}
+
+.art-video-player .art-contextmenu a {
+  color: rgba(255, 255, 255, 0.8) !important;
+  text-decoration: none;
+}
+
+.art-video-player .art-contextmenu a:hover {
+  color: #60a5fa !important;
+}
+
+/* --- 提示文字 --- */
+.art-video-player .art-tip {
+  background: var(--art-tip-background) !important;
+  border-radius: 10px !important;
+  padding: 8px 16px !important;
+  font-size: 13px !important;
+  font-weight: 500;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* --- 遮罩和 loading --- */
+.art-video-player .art-loading {
+  filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.3));
+}
+
+.art-video-player .art-mask .art-state {
+  background: rgba(59, 130, 246, 0.15);
+  border-radius: 50%;
+  padding: 16px;
+  backdrop-filter: blur(4px);
+}
+
+/* --- 迷你进度条 --- */
+.art-video-player .art-mini-progress {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.art-video-player .art-mini-progress .art-mini-progress-played {
+  background: linear-gradient(90deg, #3b82f6, #60a5fa) !important;
+}
+
+/* --- 锁定按钮 --- */
+.art-video-player .art-lock {
+  background: var(--art-widget-background) !important;
+  border-radius: 50% !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.art-video-player .art-lock:hover {
+  background: rgba(59, 130, 246, 0.2) !important;
+  transform: scale(1.1);
+}
+
+/* --- PIP 画中画 --- */
+.art-video-player .art-pip-header {
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent) !important;
+}
+
+/* --- Tooltip --- */
+.art-video-player .art-control .art-control-tooltip {
+  background: var(--art-tip-background) !important;
+  border-radius: 8px !important;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+/* --- 全屏 Web 模式 --- */
+.art-video-player.art-fullscreen-web {
+  border-radius: 0 !important;
+}
+
+/* --- 高亮章节标记 --- */
+.art-video-player .art-progress-highlight {
+  background: rgba(96, 165, 250, 0.6) !important;
+  border-radius: 2px;
+}
+
+/* --- 播放器容器圆角（非全屏时） --- */
+.art-video-player:not(.art-fullscreen):not(.art-fullscreen-web) {
+  border-radius: var(--art-border-radius);
+  overflow: hidden;
+}
+
+/* --- 自定义滚动条（设置/选择器面板内） --- */
+.art-video-player .art-settings::-webkit-scrollbar,
+.art-video-player .art-selector-list::-webkit-scrollbar {
+  width: var(--art-scrollbar-size);
+}
+
+.art-video-player .art-settings::-webkit-scrollbar-thumb,
+.art-video-player .art-selector-list::-webkit-scrollbar-thumb {
+  background: var(--art-scrollbar-background);
+  border-radius: 3px;
+}
+
+.art-video-player .art-settings::-webkit-scrollbar-thumb:hover,
+.art-video-player .art-selector-list::-webkit-scrollbar-thumb:hover {
+  background: var(--art-scrollbar-background-hover);
+}
+
+/* ========================================
+   ReactFlow: 循环容器内边线可见性修复
+   ======================================== */
+.react-flow__node-loopContainer {
+  z-index: -1 !important;
+}
+
+/* ========================================
+   电子书阅读器：图片行内/块级自适应
+   ======================================== */
+
+/* 覆盖 prose 的 display:block，让公式图片行内显示 */
+.reader-content img {
+  display: inline;
+  vertical-align: middle;
+  margin: 0 0.15em;
+  max-height: 1.8em;
+}
+
+/* 独立段落中的大图保持块级居中 */
+.reader-content p > img:only-child,
+.reader-content .block-img,
+.reader-content figure img {
+  display: block;
+  margin: 1em auto;
+  max-height: none;
+  max-width: 100%;
+}
+
+/* ========================================
+   电子书阅读器：数学公式样式
+   ======================================== */
+
+/* KaTeX 行内公式 */
+.reader-content .katex {
+  font-size: 1.05em;
+}
+
+/* KaTeX 块级公式 */
+.reader-content .katex-display {
+  margin: 1.5em 0;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5em 0;
+}
+
+/* MathML 原生渲染样式 */
+.reader-content math {
+  font-size: 1.05em;
+}
+
+.reader-content math[display="block"] {
+  display: block;
+  text-align: center;
+  margin: 1.5em 0;
+  overflow-x: auto;
+}
+
+/* 公式溢出时可横向滚动 */
+.reader-content .katex-display > .katex {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ========================================
+   AI 对话：数学公式样式
+   ======================================== */
+
+/* 对话气泡中的行内公式 */
+.prose .katex {
+  font-size: 1em;
+}
+
+/* 对话气泡中的块级公式 */
+.prose .katex-display {
+  margin: 0.75em 0;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+}
+
+/* 块级公式溢出时可横向滚动 */
+.prose .katex-display > .katex {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* 确保公式不被 prose 的 code 样式影响 */
+.prose .katex code,
+.prose .katex-display code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  border-radius: 0;
+}
+
+/* ========================================
+   PDF 阅读器：页面样式
+   ======================================== */
+
+.pdf-page-wrapper {
+  display: flex;
+  justify-content: center;
+}
+
+.pdf-page-wrapper .react-pdf__Page {
+  box-shadow: 0 4px 24px -4px rgba(0, 0, 0, 0.12), 0 0 8px -2px rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.pdf-page-wrapper .react-pdf__Page canvas {
+  display: block;
+}

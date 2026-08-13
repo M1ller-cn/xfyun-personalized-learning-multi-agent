@@ -1,0 +1,48 @@
+FROM python:3.11-slim
+
+# 安装运行时依赖（包括 curl 用于健康检查）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        fonts-noto-cjk \
+        fontconfig \
+        poppler-utils \
+        curl \
+    && fc-cache -fv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建工作目录和非 root 用户
+RUN mkdir -p /app && \
+    useradd -m -u 1000 -s /bin/bash appuser && \
+    chown -R appuser:appuser /app
+
+WORKDIR /app
+
+# 先复制依赖文件，利用 Docker 缓存
+COPY --chown=appuser:appuser requirements.txt .
+# 安装到系统目录，避免 PATH 问题
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 安装 Playwright Chromium 浏览器（用于 HTML→PNG 渲染）
+# 使用共享路径，确保 appuser 运行时也能找到浏览器
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
+RUN playwright install --with-deps chromium && \
+    chown -R appuser:appuser /app/.playwright-browsers
+
+# 复制源代码
+COPY --chown=appuser:appuser src/ ./src/
+
+EXPOSE 8100
+
+ENV PORT=8100
+ENV PYTHONUNBUFFERED=1
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8100/health || exit 1
+
+# The entrypoint grants the mounted local-output volume to appuser and then
+# immediately drops privileges before starting the web service.
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

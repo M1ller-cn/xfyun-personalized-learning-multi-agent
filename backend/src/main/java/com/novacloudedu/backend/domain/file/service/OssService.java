@@ -1,0 +1,84 @@
+package com.novacloudedu.backend.domain.file.service;
+
+import com.novacloudedu.backend.domain.file.valueobject.FileBusinessType;
+import org.springframework.web.multipart.MultipartFile;
+
+/**
+ * 对象存储服务接口
+ * 支持阿里云OSS、腾讯云COS、MinIO等
+ */
+public interface OssService {
+
+    /**
+     * 上传文件
+     * @param file 文件
+     * @param businessType 业务类型（决定存储文件夹）
+     * @return 文件访问URL
+     */
+    String uploadFile(MultipartFile file, FileBusinessType businessType);
+
+    /**
+     * 删除文件
+     * @param fileUrl 文件URL
+     */
+    void deleteFile(String fileUrl);
+
+    /**
+     * 生成预签名URL（用于私有文件临时访问）
+     * @param fileUrl 文件URL
+     * @param expireSeconds 过期时间（秒）
+     * @return 预签名URL
+     */
+    String generatePresignedUrl(String fileUrl, long expireSeconds);
+
+    /**
+     * 检查文件是否存在
+     * @param fileUrl 文件URL
+     * @return 是否存在
+     */
+    boolean fileExists(String fileUrl);
+
+    /**
+     * 上传字节数组（用于AI生成图片等场景）
+     * @param data 文件字节数据
+     * @param extension 文件扩展名（如 ".png"）
+     * @param businessType 业务类型
+     * @return 文件访问URL
+     */
+    String uploadBytes(byte[] data, String extension, FileBusinessType businessType);
+
+    /**
+     * 读取文件内容为字符串（用于工作流文件读取节点）
+     * @param fileUrl 文件URL
+     * @param encoding 字符编码（如 "UTF-8"）
+     * @return 文件文本内容
+     */
+    String readFileAsString(String fileUrl, String encoding);
+
+    /**
+     * 上传字符串内容为文件（用于工作流文件写入节点）
+     * @param content 文本内容
+     * @param fileName 文件名（如 "output.txt"）
+     * @param encoding 字符编码（如 "UTF-8"）
+     * @param businessType 业务类型
+     * @return 文件访问URL
+     */
+    String uploadString(String content, String fileName, String encoding, FileBusinessType businessType);
+
+    /**
+     * 获取文件大小（字节）
+     * @param fileUrl 文件URL
+     * @return 文件大小，文件不存在返回 -1
+     */
+    long getFileSize(String fileUrl);
+
+    /**
+     * 上传字节数组到指定的 OSS 路径（保留原始文件名）
+     * @param data 文件字节数据
+     * @param objectName OSS 对象名（如 "course/hls/123/seg_000.ts"）
+     * @param contentType MIME 类型
+     * @param publicRead 是否设置公开读权限
+     * @return 文件访问URL
+     */
+    String uploadToPath(byte[] data, String objectName, String contentType, boolean publicRead);
+}

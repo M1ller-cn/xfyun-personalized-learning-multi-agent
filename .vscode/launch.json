@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "星图智课 APP 演示（Edge）",
+      "type": "msedge",
+      "request": "launch",
+      "url": "http://127.0.0.1:5174/mobile-demo",
+      "webRoot": "${workspaceFolder}/web/src",
+      "preLaunchTask": "星图智课：启动 Web 与移动端演示",
+      "runtimeArgs": [
+        "--new-window",
+        "--window-size=460,940"
+      ]
+    }
+  ]
+}
