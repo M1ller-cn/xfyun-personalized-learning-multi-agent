@@ -17,6 +17,7 @@ import toast from '../ui/Toast';
 import { useTextToSpeech } from '../../hooks/useTextToSpeech';
 import AiMessageActions from './AiMessageActions';
 import VoiceInputButton from './VoiceInputButton';
+import DigitalHumanPanel from './DigitalHumanPanel';
 
 const aiApi = new AIApi(new Configuration(), '', apiClient);
 
@@ -698,13 +699,12 @@ interface ChatAreaProps {
   ragStatus?: string;
   workflowStatus?: 'idle' | 'calling' | 'completed' | 'error';
   lastAssistantReply?: string;
-  onAssistantReply?: (reply: string) => void;
 }
 
 const ChatArea: React.FC<ChatAreaProps> = ({
   messages, streamingContent, isLoading, isInitializing,
   sessionTitle, imageGenerations = [], videoGenerations = [], onSend, onCancel, onNewSession, onRetry,
-  assistant, ragStatus, workflowStatus, lastAssistantReply, onAssistantReply,
+  assistant, ragStatus, workflowStatus, lastAssistantReply,
 }) => {
   const currentUser = useMemo(() => getCurrentUserInfo(), []);
   const tts = useTextToSpeech();
@@ -720,7 +720,6 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const voiceBaseInputRef = useRef('');
-  const notifiedReplyRef = useRef('');
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const container = messagesContainerRef.current;
@@ -761,16 +760,6 @@ const ChatArea: React.FC<ChatAreaProps> = ({
       el.style.height = Math.min(el.scrollHeight, 160) + 'px';
     }
   }, [input]);
-
-  useEffect(() => {
-    if (!onAssistantReply || isLoading || streamingContent) return;
-    const finalReply = lastAssistantReply
-      || [...messages].reverse().find(message => message.role === 'assistant' && !message.isStreaming)?.content;
-    const reply = finalReply?.trim();
-    if (!reply || reply === notifiedReplyRef.current) return;
-    notifiedReplyRef.current = reply;
-    onAssistantReply(reply);
-  }, [messages, isLoading, streamingContent, lastAssistantReply, onAssistantReply]);
 
   const handleSend = async () => {
     const content = input.trim();
@@ -1152,7 +1141,7 @@ const ChatArea: React.FC<ChatAreaProps> = ({
 
 // ============ 通用模式面板 ============
 
-const GeneralModePanel: React.FC<{ onAssistantReply?: (reply: string) => void }> = ({ onAssistantReply }) => {
+const GeneralModePanel: React.FC = () => {
   const {
     sessions, messages, currentSessionId, sessionTitle,
     isLoading, isLoadingSessions, isInitializing, streamingContent,
@@ -1300,7 +1289,6 @@ const GeneralModePanel: React.FC<{ onAssistantReply?: (reply: string) => void }>
           onCancel={cancelStream}
           onNewSession={handleNewSession}
           onRetry={retryMessage}
-          onAssistantReply={onAssistantReply}
         />
       )}
     </div>
@@ -1309,7 +1297,7 @@ const GeneralModePanel: React.FC<{ onAssistantReply?: (reply: string) => void }>
 
 // ============ 助手模式面板 ============
 
-const AssistantModePanel: React.FC<{ assistantId: string; onAssistantReply?: (reply: string) => void }> = ({ assistantId, onAssistantReply }) => {
+const AssistantModePanel: React.FC<{ assistantId: string }> = ({ assistantId }) => {
   const navigate = useNavigate();
 
   const [assistants, setAssistants] = useState<AiAssistantVO[]>([]);
@@ -1409,22 +1397,24 @@ const AssistantModePanel: React.FC<{ assistantId: string; onAssistantReply?: (re
       />
 
       {selectedAssistant ? (
-        <ChatArea
-          assistant={selectedAssistant}
-          messages={messages}
-          streamingContent={streamingContent}
-          isLoading={isLoading}
-          isInitializing={isInitializing}
-          sessionTitle={selectedAssistant.name || ''}
-          ragStatus={ragStatus}
-          workflowStatus={workflowStatus}
-          lastAssistantReply={lastAssistantReply}
-          onSend={handleSend}
-          onCancel={cancelStream}
-          onNewSession={handleNewSession}
-          onRetry={retryMessage}
-          onAssistantReply={onAssistantReply}
-        />
+        <>
+          <ChatArea
+            assistant={selectedAssistant}
+            messages={messages}
+            streamingContent={streamingContent}
+            isLoading={isLoading}
+            isInitializing={isInitializing}
+            sessionTitle={selectedAssistant.name || ''}
+            ragStatus={ragStatus}
+            workflowStatus={workflowStatus}
+            lastAssistantReply={lastAssistantReply}
+            onSend={handleSend}
+            onCancel={cancelStream}
+            onNewSession={handleNewSession}
+            onRetry={retryMessage}
+          />
+          <DigitalHumanPanel replyText={lastAssistantReply} />
+        </>
       ) : (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center text-gray-400">
@@ -1441,18 +1431,17 @@ const AssistantModePanel: React.FC<{ assistantId: string; onAssistantReply?: (re
 
 interface AiChatPanelProps {
   assistantId?: string;
-  onAssistantReply?: (reply: string) => void;
 }
 
-const AiChatPanel: React.FC<AiChatPanelProps> = ({ assistantId, onAssistantReply }) => {
+const AiChatPanel: React.FC<AiChatPanelProps> = ({ assistantId }) => {
   // 也支持从路由参数获取 assistantId
   const params = useParams<{ assistantId?: string }>();
   const resolvedAssistantId = assistantId || params.assistantId;
 
   if (resolvedAssistantId) {
-    return <AssistantModePanel assistantId={resolvedAssistantId} onAssistantReply={onAssistantReply} />;
+    return <AssistantModePanel assistantId={resolvedAssistantId} />;
   }
-  return <GeneralModePanel onAssistantReply={onAssistantReply} />;
+  return <GeneralModePanel />;
 };
 
 export default AiChatPanel;

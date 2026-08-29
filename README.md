@@ -53,10 +53,11 @@
 ```powershell
 cd "项目根目录"
 Copy-Item docker/.env.example docker/.env
-Copy-Item web/.env.example web/.env.local
 ```
 
 编辑 `docker/.env`，填写数据库、Redis、Neo4j、JWT 等本地配置；如需 AI 对话，填写 `DEEPSEEK_API_KEY` 并将 `DEEPSEEK_ENABLED=true`。数字人、OSS、语音等为可选配置。
+
+提交包已预置数字人的 App ID。若需启用真人数字人助教，在网页右侧面板输入本机的 App Secret 即可；不要将 App Secret 写入源码或提交文件。
 
 ### 3. 启动后端依赖与服务
 
@@ -77,9 +78,11 @@ cd "项目根目录"
 
 访问：
 
-- 学生端：`http://127.0.0.1:5174/`
-- 教师端：`http://127.0.0.1:5174/login?entry=teacher`
-- 教师端登录后：`http://127.0.0.1:5174/admin`
+- 访客首页：`http://127.0.0.1:5174/visitor`
+- 学生端：`http://127.0.0.1:5174/login?entry=student`，账号 `student`，密码 `123456`
+- 教师端：`http://127.0.0.1:5174/login?entry=teacher`，账号 `teacher`，密码 `123456`
+- 移动端演示：`http://127.0.0.1:5174/mobile-demo`
+- 真人数字人助教：`http://127.0.0.1:5174/ai-chat/1`（宽屏下显示在右侧）
 
 ### 5. 健康检查与停止
 

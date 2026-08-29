@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Eye, EyeOff, User, Lock, Phone, ShieldCheck } from 'lucide-react';
-import { apiClient, saveTokens, getToken, DefaultApi, Configuration } from '../api';
+import { apiClient, saveTokens, getToken, clearTokens, DefaultApi, Configuration } from '../api';
 import { toast } from '../components/ui';
 import logo from '../assets/logo.svg';
 
@@ -50,6 +50,12 @@ export default function LoginPage() {
 
   // 检查是否已登录
   useEffect(() => {
+    if (forceCredentialPrompt) {
+      // Role-specific entrances always start from a fresh session.
+      clearTokens();
+      localStorage.removeItem(USER_INFO_KEY);
+      return;
+    }
     if (getToken() && !forceCredentialPrompt) {
       const userInfoStr = localStorage.getItem(USER_INFO_KEY);
       const userInfo = userInfoStr ? JSON.parse(userInfoStr) : null;
@@ -78,7 +84,15 @@ export default function LoginPage() {
       };
       const role = String(userInfo.userRole || '').toLowerCase();
       if (entry === 'teacher' && role !== 'admin' && role !== 'teacher') {
+        clearTokens();
+        localStorage.removeItem(USER_INFO_KEY);
         toast.error('请使用教师或管理员账号登录管理端');
+        return;
+      }
+      if (entry === 'student' && (role === 'admin' || role === 'teacher')) {
+        clearTokens();
+        localStorage.removeItem(USER_INFO_KEY);
+        toast.error('请使用学生账号登录学生端');
         return;
       }
       saveTokens(data.data.token, data.data.refreshToken || '');

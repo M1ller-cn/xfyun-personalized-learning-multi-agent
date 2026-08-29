@@ -206,7 +206,7 @@ export default function VisitorPortalPage() {
             <a href="#roles" onClick={() => setMenuOpen(false)}>双端服务</a>
           </nav>
           <div className="visitor-actions">
-            <button className="visitor-text-button" onClick={() => navigate('/login')}>登录</button>
+            <button className="visitor-text-button" onClick={() => navigate('/login?entry=student')}>登录</button>
             <button className="visitor-primary-small" onClick={() => navigate('/login?entry=teacher')}>管理端</button>
             <button className="visitor-menu-button" onClick={() => setMenuOpen((open) => !open)} aria-label="切换导航">
               <span /><span /><span />
@@ -225,7 +225,7 @@ export default function VisitorPortalPage() {
             <h1><span>星图智课</span>让每一次学习<br />都有清晰的下一步</h1>
             <p>从对话画像到专属路径，从课程知识库到即时评测，六个智能体持续理解、规划并陪伴你的学习过程。</p>
             <div className="visitor-hero-actions">
-              <button className="visitor-primary-button" onClick={() => navigate('/login')}>
+              <button className="visitor-primary-button" onClick={() => navigate('/login?entry=student')}>
                 开始我的学习 <ArrowRight size={18} />
               </button>
               <a href="#journey" className="visitor-secondary-button"><Play size={16} fill="currentColor" /> 了解学习闭环</a>
@@ -285,7 +285,7 @@ export default function VisitorPortalPage() {
                   <button type="button" className={`visitor-map-node ${topic === '数组与链表' ? 'done' : ''} ${topic === activeTopic ? 'active' : ''}`} onClick={() => setActiveTopic(topic)}>{topic === '数组与链表' && <CheckCircle2 size={17} />}{topic === activeTopic && topic !== '数组与链表' && <span className="visitor-pulse" />}{topic}</button>
                 </Fragment>)}
               </div>
-              <div className="visitor-demo-insight"><Sparkles size={16} /><span>{topicInsights[activeTopic]}</span><button onClick={() => navigate('/login')}>进入练习</button></div>
+              <div className="visitor-demo-insight"><Sparkles size={16} /><span>{topicInsights[activeTopic]}</span><button onClick={() => navigate('/login?entry=student')}>进入练习</button></div>
             </div>
             <div className="visitor-demo-score">
               <div className="visitor-score-ring"><strong>68%</strong><span>课程进度</span></div>
@@ -326,7 +326,7 @@ export default function VisitorPortalPage() {
             </div>
           </Reveal>
           <Reveal className="visitor-course-focus">
-            <span>当前课程</span><strong>{courses[activeCourse].focus}</strong><small>{courses[activeCourse].meta}</small><button type="button" onClick={() => navigate('/login')}>进入课程 <ArrowRight size={15} /></button>
+            <span>当前课程</span><strong>{courses[activeCourse].focus}</strong><small>{courses[activeCourse].meta}</small><button type="button" onClick={() => navigate('/login?entry=student')}>进入课程 <ArrowRight size={15} /></button>
           </Reveal>
           <Reveal className="visitor-resource-row">
             {[
@@ -334,7 +334,7 @@ export default function VisitorPortalPage() {
               [Code2, '代码实操'], [ClipboardCheck, '智能测验'], [Bot, 'RAG 辅导'],
             ].map(([Icon, label]) => {
               const ResourceIcon = Icon as typeof BookOpen;
-              return <button type="button" key={label as string} onClick={() => navigate('/login')}><ResourceIcon size={21} /><span>{label as string}</span><CheckCircle2 size={15} /></button>;
+              return <button type="button" key={label as string} onClick={() => navigate('/login?entry=student')}><ResourceIcon size={21} /><span>{label as string}</span><CheckCircle2 size={15} /></button>;
             })}
           </Reveal>
         </section>
@@ -346,7 +346,7 @@ export default function VisitorPortalPage() {
           </Reveal>
           <div className="visitor-role-bands">
             <Reveal className="visitor-role-band student">
-              <div className="visitor-role-copy"><span><GraduationCap size={18} /> 学生端</span><h3>知道现在学什么<br />也知道为什么学</h3><p>画像、路径、课程、练习、评测和智能辅导集中在同一个学习现场。</p><button onClick={() => navigate('/login')}>进入学生端 <ArrowRight size={17} /></button></div>
+              <div className="visitor-role-copy"><span><GraduationCap size={18} /> 学生端</span><h3>知道现在学什么<br />也知道为什么学</h3><p>画像、路径、课程、练习、评测和智能辅导集中在同一个学习现场。</p><button onClick={() => navigate('/login?entry=student')}>进入学生端 <ArrowRight size={17} /></button></div>
               <div className="visitor-role-visual"><div className="visitor-chat-bubble ai"><Bot size={16} />你在递归边界上容易遗漏，我为你安排了两道针对性练习。</div><div className="visitor-chat-bubble user">先帮我讲清楚第一题的思路。</div><div className="visitor-learning-stat"><LineChart size={20} /><span>薄弱点掌握度</span><strong>42% → 76%</strong></div></div>
             </Reveal>
             <Reveal className="visitor-role-band teacher">
@@ -362,14 +362,14 @@ export default function VisitorPortalPage() {
             <span className="visitor-final-mark"><img src={logo} alt="" /></span>
             <h2>从今天的一个问题<br />走向属于你的知识地图</h2>
             <p>登录星图智课，让学习路径从第一次对话开始生长。</p>
-            <button className="visitor-primary-button" onClick={() => navigate('/login')}>开始学习 <ArrowRight size={18} /></button>
+            <button className="visitor-primary-button" onClick={() => navigate('/login?entry=student')}>开始学习 <ArrowRight size={18} /></button>
           </Reveal>
         </section>
       </main>
 
       <footer className="visitor-footer">
         <div><span className="visitor-footer-brand"><img src={logo} alt="" />星图智课</span><p>AI 驱动的个性化课程学习平台</p></div>
-        <div><a href="#journey">学习闭环</a><a href="#courses">精品课程</a><button onClick={() => navigate('/login')}>登录</button></div>
+        <div><a href="#journey">学习闭环</a><a href="#courses">精品课程</a><button onClick={() => navigate('/login?entry=student')}>登录</button></div>
         <small>© 2026 星图智课</small>
       </footer>
     </div>

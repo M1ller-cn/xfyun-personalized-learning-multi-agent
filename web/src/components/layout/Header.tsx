@@ -295,7 +295,7 @@ export const Header: React.FC = () => {
     localStorage.removeItem(USER_INFO_KEY);
     setUserInfo(null);
     setShowDropdown(false);
-    navigate('/login');
+    window.location.assign('/visitor');
   };
 
   const userRole = userInfo?.userRole || userInfo?.role;

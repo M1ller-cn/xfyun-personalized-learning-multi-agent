@@ -187,7 +187,6 @@ const AdminSider: React.FC<AdminSiderProps> = ({
   setIsMobileOpen 
 }) => {
   const location = useLocation();
-  const navigate = useNavigate();
   const [showText, setShowText] = React.useState(!isCollapsed);
 
   React.useEffect(() => {
@@ -249,7 +248,7 @@ const AdminSider: React.FC<AdminSiderProps> = ({
   const handleLogout = () => {
     clearTokens();
     localStorage.removeItem('user_info');
-    navigate('/login');
+    window.location.assign('/visitor');
   };
 
   const siderClasses = `
